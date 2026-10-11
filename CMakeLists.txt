@@ -29,7 +29,12 @@ if(WITH_ESPEAK)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/gen")
   file(WRITE "${CMAKE_BINARY_DIR}/gen/config.h"
 "#define PACKAGE_NAME \"espeak-ng\"\n#define PACKAGE_VERSION \"1.51.1\"\n#define PACKAGE_STRING \"espeak-ng 1.51.1\"\n#define HAVE_STDINT_H 1\n#define HAVE_INTTYPES_H 1\n")
+  set(ENDIAN_SHIM "#ifndef VITA_ENDIAN_SHIM_H\n#define VITA_ENDIAN_SHIM_H\n#include <stdint.h>\n#ifndef __BYTE_ORDER\n#define __LITTLE_ENDIAN 1234\n#define __BIG_ENDIAN 4321\n#define __BYTE_ORDER __LITTLE_ENDIAN\n#endif\n#ifndef htobe16\n#define htobe16(x) __builtin_bswap16(x)\n#endif\n#ifndef htole16\n#define htole16(x) (x)\n#endif\n#ifndef be16toh\n#define be16toh(x) __builtin_bswap16(x)\n#endif\n#ifndef le16toh\n#define le16toh(x) (x)\n#endif\n#ifndef htobe32\n#define htobe32(x) __builtin_bswap32(x)\n#endif\n#ifndef htole32\n#define htole32(x) (x)\n#endif\n#ifndef be32toh\n#define be32toh(x) __builtin_bswap32(x)\n#endif\n#ifndef le32toh\n#define le32toh(x) (x)\n#endif\n#ifndef htobe64\n#define htobe64(x) __builtin_bswap64(x)\n#endif\n#ifndef htole64\n#define htole64(x) (x)\n#endif\n#ifndef be64toh\n#define be64toh(x) __builtin_bswap64(x)\n#endif\n#ifndef le64toh\n#define le64toh(x) (x)\n#endif\n#endif\n")
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/gen/compat")
+  file(WRITE "${CMAKE_BINARY_DIR}/gen/endian.h" "${ENDIAN_SHIM}")
+  file(WRITE "${CMAKE_BINARY_DIR}/gen/compat/endian.h" "${ENDIAN_SHIM}")
   file(GLOB ES_SRC "${ESPEAK_DIR}/src/libespeak-ng/*.c" "${ESPEAK_DIR}/src/ucd-tools/src/*.c")
+  list(FILTER ES_SRC EXCLUDE REGEX "compilembrola\\.c$")
   if(NOT WITH_MBROWRAP)
     list(FILTER ES_SRC EXCLUDE REGEX "mbrowrap\\.c$")
   endif()
@@ -38,7 +43,6 @@ if(WITH_ESPEAK)
   target_include_directories(ttsespeak PRIVATE
     "${CMAKE_BINARY_DIR}/gen"
     "${ESPEAK_DIR}/src/include"
-    "${ESPEAK_DIR}/src/include/compat"
     "${ESPEAK_DIR}/src/libespeak-ng"
     "${ESPEAK_DIR}/src/ucd-tools/src/include")
   list(APPEND LIBS ttsespeak)
