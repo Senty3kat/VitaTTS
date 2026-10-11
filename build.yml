@@ -2,7 +2,7 @@ name: Build Vita Simple TTS
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
