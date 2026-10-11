@@ -1,22 +1,17 @@
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/audioout.h>
-#include <psp2/display.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-
-#include "debugScreen.h"
-
-#define printf psvDebugScreenPrintf
+#include <vita2d.h>
 
 #define SAMPLE_RATE 44100
 #define BUFFER_SIZE 1024
 
 static char text_buffer[256] = "Hello World From Vita";
 
-// Форманты для "гласных" звуков
 static int formant_freqs[][3] = {
     {730, 1090, 2440},
     {530, 1840, 2480},
@@ -74,32 +69,39 @@ static void speak_text(const char *text) {
     sceAudioOutReleasePort(port);
 }
 
-static void draw_screen(void) {
-    psvDebugScreenClear();
-    printf("=================================\n");
-    printf("        Vita Simple TTS\n");
-    printf("=================================\n\n");
-    printf("Current text:\n");
-    printf("  \"%s\"\n\n", text_buffer);
-    printf("---------------------------------\n");
-    printf("CONTROLS:\n");
-    printf("  START   - Speak text\n");
-    printf("  SQUARE  - (reserved for keyboard)\n");
-    printf("  CIRCLE  - Clear text\n");
-    printf("  TRIANGLE- Reset to default text\n");
-    printf("---------------------------------\n\n");
-    printf("Press START to hear the voice.\n");
+// Рисуем интерфейс
+static void draw_ui(vita2d_pgf *font) {
+    vita2d_start_drawing();
+    vita2d_clear_screen();
+
+    vita2d_pgf_draw_text(font, 20, 40, RGBA8(255, 255, 255, 255), 1.0f, "Vita Simple TTS");
+
+    // Рисуем текст в рамке
+    vita2d_draw_rectangle(20, 60, 920, 40, RGBA8(40, 40, 60, 255)); // Фон поля
+    vita2d_pgf_draw_text(font, 30, 90, RGBA8(255, 255, 255, 255), 1.0f, text_buffer);
+
+    // Подсказки
+    vita2d_pgf_draw_text(font, 20, 140, RGBA8(200, 200, 100, 255), 1.0f, "CONTROLS:");
+    vita2d_pgf_draw_text(font, 20, 170, RGBA8(180, 180, 180, 255), 1.0f, "START   - Speak text");
+    vita2d_pgf_draw_text(font, 20, 190, RGBA8(180, 180, 180, 255), 1.0f, "CIRCLE  - Clear text");
+    vita2d_pgf_draw_text(font, 20, 210, RGBA8(180, 180, 180, 255), 1.0f, "TRIANGLE- Reset to default text");
+
+    vita2d_pgf_draw_text(font, 20, 260, RGBA8(150, 150, 150, 255), 1.0f, "Press START to hear the voice.");
+
+    vita2d_end_drawing();
+    vita2d_swap_buffers();
 }
 
 int main(void) {
-    psvDebugScreenInit();
+    // Инициализация графики
+    vita2d_init();
+    vita2d_pgf *font = vita2d_load_default_pgf();
+    vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
 
     SceCtrlData pad;
     int prev_start = 0;
     int prev_circle = 0;
     int prev_triangle = 0;
-
-    draw_screen();
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
@@ -113,21 +115,24 @@ int main(void) {
         }
         if (circle_now && !prev_circle) {
             text_buffer[0] = '\0';
-            draw_screen();
         }
         if (triangle_now && !prev_triangle) {
             strncpy(text_buffer, "Hello World From Vita", sizeof(text_buffer) - 1);
             text_buffer[sizeof(text_buffer) - 1] = '\0';
-            draw_screen();
         }
 
         prev_start    = start_now;
         prev_circle   = circle_now;
         prev_triangle = triangle_now;
 
-        sceKernelDelayThread(50000);
+        // Рисуем интерфейс каждый кадр
+        draw_ui(font);
+
+        sceKernelDelayThread(16000); // ~60 FPS
     }
 
+    vita2d_free_pgf(font);
+    vita2d_fini();
     sceKernelExitProcess(0);
     return 0;
 }
