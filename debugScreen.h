@@ -3,6 +3,7 @@
 
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <stdarg.h>
 
 void psvDebugScreenInit();
