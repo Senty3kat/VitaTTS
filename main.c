@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define SAMPLE_RATE 44100
+#define SAMPLE_RATE 48000
 #define BUFFER_SIZE 1024
 
 static char text_buffer[256] = "Hello World From Vita";
@@ -42,10 +42,18 @@ static void generate_tone(short *buffer, int len, int freq, float duration_sec) 
 }
 
 static void speak_text(const char *text) {
-    int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN,
+    // Пробуем BGM порт, если MAIN не работает с 48000
+    int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM,
                                    BUFFER_SIZE / 2,
                                    SAMPLE_RATE,
                                    SCE_AUDIO_OUT_MODE_STEREO);
+    if (port < 0) {
+        // Если BGM не открылся, пробуем MAIN
+        port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN,
+                                   BUFFER_SIZE / 2,
+                                   SAMPLE_RATE,
+                                   SCE_AUDIO_OUT_MODE_STEREO);
+    }
     if (port < 0) return;
 
     short *buffer = (short *)malloc(BUFFER_SIZE * sizeof(short));
@@ -73,6 +81,9 @@ int main(void) {
     int prev_start = 0;
     int prev_circle = 0;
     int prev_triangle = 0;
+
+    // Даем приложению время на инициализацию
+    sceKernelDelayThread(100000);
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
