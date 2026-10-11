@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(vita-simple-tts C)
 
 set(VITA_APP_NAME "Vita Simple TTS")
-set(VITA_TITLEID  "VTT00003")
+set(VITA_TITLEID  "ROBO12345")
 set(VITA_VERSION  "01.00")
 
 include("${VITASDK}/share/vita.cmake" REQUIRED)
