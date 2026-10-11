@@ -7,9 +7,9 @@
 #include <math.h>
 
 #define SAMPLE_RATE 48000
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 512
 
-static char text_buffer[256] = "Hello World From Vita";
+static char text_buffer[256] = "Hello";
 
 static int formant_freqs[][3] = {
     {730, 1090, 2440},
@@ -31,7 +31,12 @@ static void generate_tone(short *buffer, int len, int freq, float duration_sec) 
             float ff = formant_freqs[formant_idx][f];
             val += 0.3f * sinf(2.0f * M_PI * ff * t);
         }
-        val = val / 4.0f;
+        // Затухание в конце, чтобы не было щелчков
+        float env = 1.0f;
+        if (i > samples - 200) env = (float)(samples - i) / 200.0f;
+        if (i < 200) env = (float)i / 200.0f;
+
+        val = (val / 4.0f) * env;
         buffer[i * 2]     = (short)(val * 32767);
         buffer[i * 2 + 1] = (short)(val * 32767);
     }
@@ -42,18 +47,10 @@ static void generate_tone(short *buffer, int len, int freq, float duration_sec) 
 }
 
 static void speak_text(const char *text) {
-    // Пробуем BGM порт, если MAIN не работает с 48000
     int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM,
                                    BUFFER_SIZE / 2,
                                    SAMPLE_RATE,
                                    SCE_AUDIO_OUT_MODE_STEREO);
-    if (port < 0) {
-        // Если BGM не открылся, пробуем MAIN
-        port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN,
-                                   BUFFER_SIZE / 2,
-                                   SAMPLE_RATE,
-                                   SCE_AUDIO_OUT_MODE_STEREO);
-    }
     if (port < 0) return;
 
     short *buffer = (short *)malloc(BUFFER_SIZE * sizeof(short));
@@ -64,11 +61,20 @@ static void speak_text(const char *text) {
         if (c == ' ') {
             memset(buffer, 0, BUFFER_SIZE * sizeof(short));
             sceAudioOutOutput(port, buffer);
+            sceKernelDelayThread(150000);
         } else {
             formant_idx = (c % 5);
-            int base_freq = 100 + (c % 100);
-            generate_tone(buffer, BUFFER_SIZE, base_freq, 0.15f);
-            sceAudioOutOutput(port, buffer);
+            int base_freq = 120 + (c % 80);
+            // Длительность 0.35 секунды, но буфер всего 512 сэмплов,
+            // поэтому проигрываем в цикле, пока не отыграет всё время
+            int total_samples = (int)(SAMPLE_RATE * 0.35f);
+            int played = 0;
+            while (played < total_samples) {
+                generate_tone(buffer, BUFFER_SIZE, base_freq,
+                              (float)(BUFFER_SIZE / 2) / SAMPLE_RATE);
+                sceAudioOutOutput(port, buffer);
+                played += BUFFER_SIZE / 2;
+            }
         }
     }
 
@@ -82,7 +88,6 @@ int main(void) {
     int prev_circle = 0;
     int prev_triangle = 0;
 
-    // Даем приложению время на инициализацию
     sceKernelDelayThread(100000);
 
     while (1) {
@@ -99,7 +104,7 @@ int main(void) {
             text_buffer[0] = '\0';
         }
         if (triangle_now && !prev_triangle) {
-            strncpy(text_buffer, "Hello World From Vita", sizeof(text_buffer) - 1);
+            strncpy(text_buffer, "Hello", sizeof(text_buffer) - 1);
             text_buffer[sizeof(text_buffer) - 1] = '\0';
         }
 
