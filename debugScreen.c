@@ -18,8 +18,6 @@ static SceUID g_fb_uid = -1;
 static int g_cursor_x = 0;
 static int g_cursor_y = 0;
 
-// Упрощённый рендер: рисуем точки по битам кода символа.
-// Не настоящий шрифт, но текст визуально различим.
 static void draw_char(int x, int y, unsigned char c, unsigned int color) {
     for (int row = 0; row < CHAR_H; row++) {
         for (int col = 0; col < CHAR_W; col++) {
@@ -52,9 +50,10 @@ void psvDebugScreenInit() {
     fb.height      = SCREEN_H;
     fb.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
 
-    sceDisplaySetFrameBuf(&fb, SCE_DISPLAY_UPDATETIMING_NEXTVSYNC);
+    // Используем числовое значение 1 (SCE_DISPLAY_UPDATETIMING_NEXTVSYNC в старых SDK)
+    sceDisplaySetFrameBuf(&fb, 1);
     sceDisplayWaitVblankStart();
-    sceDisplaySetFrameBuf(&fb, SCE_DISPLAY_UPDATETIMING_NEXTVSYNC);
+    sceDisplaySetFrameBuf(&fb, 1);
 
     psvDebugScreenClear();
 }
