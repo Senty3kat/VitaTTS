@@ -7,14 +7,13 @@ set(VITA_VERSION  "01.00")
 
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2 -lm")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
 add_executable(vita-simple-tts main.c)
 
 target_link_libraries(vita-simple-tts
     SceCtrl_stub
     SceAudio_stub
-    SceIme_stub
     SceKernelDmacMgr_stub
     SceAppMgr_stub
     SceSysmodule_stub
