@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(vita-simple-tts C)
 
 set(VITA_APP_NAME "Vita Simple TTS")
-set(VITA_TITLEID  "TTSA00001")
+set(VITA_TITLEID  "TTSA00002")
 set(VITA_VERSION  "01.00")
 
 include("${VITASDK}/share/vita.cmake" REQUIRED)
@@ -17,7 +17,6 @@ target_link_libraries(vita-simple-tts
     SceDisplay_stub
     SceGxm_stub
     SceSysmem_stub
-    SceFont_stub
     SceKernelDmacMgr_stub
     SceKernelThreadMgr_stub
     SceAppMgr_stub
