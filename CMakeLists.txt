@@ -15,6 +15,7 @@ target_link_libraries(vita-simple-tts
     SceCtrl_stub
     SceAudio_stub
     SceDisplay_stub
+    SceGxm_stub
     SceKernelDmacMgr_stub
     SceKernelThreadMgr_stub
     SceAppMgr_stub
