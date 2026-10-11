@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <vita2d.h>
 
 #define SAMPLE_RATE 44100
 #define BUFFER_SIZE 1024
@@ -70,9 +69,6 @@ static void speak_text(const char *text) {
 }
 
 int main(void) {
-    vita2d_init();
-    vita2d_set_clear_color(RGBA8(20, 20, 40, 255));
-
     SceCtrlData pad;
     int prev_start = 0;
     int prev_circle = 0;
@@ -100,32 +96,9 @@ int main(void) {
         prev_circle   = circle_now;
         prev_triangle = triangle_now;
 
-        // Рисуем только цветные индикаторы, без текста
-        vita2d_start_drawing();
-        vita2d_clear_screen();
-
-        // Верхняя полоса — заголовок приложения
-        vita2d_draw_rectangle(20, 20, 920, 60, RGBA8(60, 60, 120, 255));
-
-        // Блок "текущий текст" — если пусто, рисуем серый, если нет — зелёный
-        if (text_buffer[0] == '\0') {
-            vita2d_draw_rectangle(20, 100, 920, 100, RGBA8(80, 80, 80, 255));
-        } else {
-            vita2d_draw_rectangle(20, 100, 920, 100, RGBA8(60, 120, 60, 255));
-        }
-
-        // Индикаторы кнопок внизу
-        vita2d_draw_rectangle(20, 400, 200, 80, RGBA8(120, 60, 60, 255));   // START
-        vita2d_draw_rectangle(240, 400, 200, 80, RGBA8(120, 120, 60, 255)); // CIRCLE
-        vita2d_draw_rectangle(460, 400, 200, 80, RGBA8(60, 120, 120, 255)); // TRIANGLE
-
-        vita2d_end_drawing();
-        vita2d_swap_buffers();
-
-        sceKernelDelayThread(16000);
+        sceKernelDelayThread(50000);
     }
 
-    vita2d_fini();
     sceKernelExitProcess(0);
     return 0;
 }
