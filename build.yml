@@ -1,4 +1,4 @@
-name: Build Vita TTS VPK
+name: Build Vita Simple TTS
 
 on:
   push:
@@ -25,5 +25,5 @@ jobs:
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: vita-tts-vpk
-          path: build/vita-tts-test.vpk
+          name: vita-simple-tts-vpk
+          path: build/vita-simple-tts.vpk
