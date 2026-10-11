@@ -23,7 +23,7 @@ jobs:
           ./bootstrap-vitasdk.sh
           export PATH=$VITASDK/bin:$PATH
           vdpm search vita2d || true
-          vdpm install vita2d
+          vdpm install libvita2d
           ls $VITASDK/arm-vita-eabi/lib | head -80
 
       - name: eSpeak-NG (исходники + данные языков)
