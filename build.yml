@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     env:
-      VITASDK: /usr/local/vitasdk
+      VITASDK: /home/runner/vitasdk
     steps:
       - uses: actions/checkout@v4
 
@@ -18,8 +18,6 @@ jobs:
 
       - name: VitaSDK + vita2d
         run: |
-          sudo mkdir -p $VITASDK
-          sudo chown -R $USER $VITASDK
           git clone --depth 1 https://github.com/vitasdk/vdpm
           cd vdpm
           ./bootstrap-vitasdk.sh
