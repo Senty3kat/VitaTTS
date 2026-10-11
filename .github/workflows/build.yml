@@ -41,6 +41,8 @@ jobs:
           cp -r "$D" payload/espeak-ng-data
           find payload/espeak-ng-data -maxdepth 1 -name '*_dict' ! -name ru_dict ! -name en_dict ! -name ja_dict -delete
           rm -rf payload/espeak-ng-data/mbrola_ph
+          find payload -name '* *' -print -delete
+          find payload -type f | wc -l
 
       - name: Pico / SVOX (исходники + голоса)
         continue-on-error: true
