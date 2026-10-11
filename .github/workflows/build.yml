@@ -107,11 +107,19 @@ jobs:
           if [ $OK = 0 ]; then
             for f in log_*.txt; do
               echo "########## $f (вариант: $(cat ${f%.txt}.name))"
-              grep -E "error|undefined reference|CMake Error|In file included from" $f | head -24
+              grep -iE "error|undefined|fatal|ld returned|unresolved" $f | head -15
+              echo "--- конец лога:"; tail -n 12 $f
             done
             exit 1
           fi
           ls -la build/*.vpk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: log_*.txt
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
