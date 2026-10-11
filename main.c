@@ -1,4 +1,4 @@
-// VitaTTS - быстрый TTS для PS Vita (Pico/SVOX для английского, eSpeak-NG для RU/JA/EN-retro)
+// VitaTTS v2 - быстрый TTS для PS Vita (Pico/SVOX для английского, eSpeak-NG для RU/JA/EN-retro)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,27 +26,28 @@ int _newlib_heap_size_user = 100 * 1024 * 1024;
 
 #define GRAIN 512
 #define HN 5
-#define HL 600
+#define HL 2048          /* байт на фразу */
+#define IMEMAX 500       /* символов в окне ввода */
 
 /* ---------------- состояние синтеза (общее для потоков) ---------------- */
 static volatile int g_abort, g_req, g_busy, g_ready;
 static char rq_text[HL];
-static int rq_eng, rq_speed = 100, rq_pitch = 100;
-static char rq_voice[32];
-static int pico_ok[2], es_ok;
+static int rq_eng, rq_speed = 100, rq_pitch = 100, rq_range = 50;
+static char rq_voice[40];
+static int pico_ok[2], pico_err[2], es_ok;
+static int es_rc, es_get;
+static volatile int g_synth_ms, g_audio_ms, g_under;
 
 /* ---------------- вывод звука: кольцевой буфер + отдельный аудиопоток ---------------- */
 #define RING (1 << 20)          /* ~21 c при 48 кГц */
-#define PREBUF 14400            /* 0.3 c предбуфер: скрывает паузы синтеза */
+#define PREBUF 19200            /* 0.4 c предбуфер */
 static int aport = -1;
-static short ring[RING];
+static short ring[RING] __attribute__((aligned(64)));
 static volatile unsigned rhead, rtail;
 static volatile int g_flush, g_done, g_play;
-static double rt;
-static short rprev;
 
 static int audio_thread(SceSize args, void *argp) {
-    static short ab[GRAIN];
+    static short ab[GRAIN] __attribute__((aligned(64)));
     int playing = 0;
     for (;;) {
         if (g_flush) { rtail = rhead; playing = 0; g_play = 0; g_flush = 0; continue; }
@@ -70,75 +71,118 @@ static int audio_thread(SceSize args, void *argp) {
             if (avail && aport >= 0) sceAudioOutOutput(aport, ab);
             playing = 0; g_play = 0;
         } else {
-            sceKernelDelayThread(1000);   /* недогруз: ждём синтез, а не трещим */
+            /* недогруз: тишина вместо мусора, затем заново набираем предбуфер */
+            g_under++;
+            memset(ab, 0, sizeof ab);
+            if (aport >= 0) sceAudioOutOutput(aport, ab);
+            playing = 0;
         }
     }
     return 0;
 }
 
+/* ---------------- ресемплер: оконный sinc, N Гц -> 48000 Гц ---------------- */
+#define SK 8
+#define SP 128
+#define XMAX 4096
+static float ker[SP][2 * SK];
+static short hist_in[2 * SK];
+static double rt;
+static int cur_rate = 16000;
+
+static void ker_init(void) {
+    const float PI = 3.14159265f;
+    for (int p = 0; p < SP; p++) {
+        float fr = (float)p / SP, sum = 0;
+        for (int j = 0; j < 2 * SK; j++) {
+            float d = (float)(j - (SK - 1)) - fr, w;
+            if (fabsf(d) < 1e-6f) w = 1.0f; else { float px = PI * d; w = sinf(px) / px; }
+            float ad = fabsf(d) / SK;
+            float win = ad >= 1.0f ? 0.0f : (0.42f + 0.5f * cosf(PI * ad) + 0.08f * cosf(2 * PI * ad));
+            ker[p][j] = w * win;
+            sum += ker[p][j];
+        }
+        for (int j = 0; j < 2 * SK; j++) ker[p][j] /= sum;
+    }
+}
+
 static void out_begin(void) {
-    rt = 0; rprev = 0; g_done = 0;
+    rt = SK - 1;
+    memset(hist_in, 0, sizeof hist_in);
+    g_done = 0;
     g_flush = 1;
     for (int i = 0; g_flush && i < 300; i++) sceKernelDelayThread(1000);
 }
 
-static void out_finish(void) {
-    __sync_synchronize();
-    if (g_abort) g_flush = 1; else g_done = 1;
-}
-
 static int emit(const short *p, int n, int rate) {
+    static short tmp[2 * SK + XMAX];
     if (n <= 0) return g_abort;
+    cur_rate = rate;
     double step = (double)rate / 48000.0;
     unsigned h = rhead;
-    while (rt < n) {
-        if (g_abort) { __sync_synchronize(); rhead = h; return 1; }
-        if (h - rtail >= RING) {
-            __sync_synchronize(); rhead = h;
-            while (h - rtail >= RING && !g_abort) sceKernelDelayThread(1000);
-            continue;
+    while (n > 0) {
+        int m = n > XMAX ? XMAX : n;
+        memcpy(tmp, hist_in, 2 * SK * sizeof(short));
+        memcpy(tmp + 2 * SK, p, m * sizeof(short));
+        while (rt < SK + m) {
+            if (g_abort) { __sync_synchronize(); rhead = h; return 1; }
+            if (h - rtail >= RING) {
+                __sync_synchronize(); rhead = h;
+                while (h - rtail >= RING && !g_abort) sceKernelDelayThread(1000);
+                continue;
+            }
+            int i = (int)rt;
+            int ph = (int)((rt - i) * SP);
+            const float *k = ker[ph];
+            const short *x = tmp + i - (SK - 1);
+            float acc = 0;
+            for (int j = 0; j < 2 * SK; j++) acc += k[j] * x[j];
+            ring[h & (RING - 1)] = acc > 32767.0f ? 32767 : (acc < -32768.0f ? -32768 : (short)acc);
+            h++;
+            rt += step;
         }
-        int i = (int)rt;
-        double fr = rt - i;
-        short a = i ? p[i - 1] : rprev;
-        short b = p[i];
-        ring[h & (RING - 1)] = (short)(a + (b - a) * fr);
-        h++;
-        rt += step;
+        memcpy(hist_in, tmp + m, 2 * SK * sizeof(short));
+        rt -= m; p += m; n -= m;
     }
-    rprev = p[n - 1];
-    rt -= n;
     __sync_synchronize();
     rhead = h;
     return g_abort;
 }
 
-/* ---------------- Pico (SVOX) ---------------- */
+static void out_finish(void) {
+    if (!g_abort) { short z[2 * SK] = {0}; emit(z, 2 * SK, cur_rate); }
+    __sync_synchronize();
+    if (g_abort) g_flush = 1; else g_done = 1;
+}
+
+/* ---------------- Pico (SVOX): отдельная система на каждый голос ---------------- */
 #ifdef HAVE_PICO
-#define PICO_MEM (24 * 1024 * 1024)
-static pico_System ps;
+#define PICO_MEM (20 * 1024 * 1024)
+static pico_System ps[2];
 static pico_Engine pe[2];
 
-static void pico_setup(void) {
+static int pico_load(int v) {
     static const char *vn[2] = {"VUS", "VGB"};
     static const char *fl[2][2] = {
         {"app0:/en-US_ta.bin", "app0:/en-US_lh0_sg.bin"},
         {"app0:/en-GB_ta.bin", "app0:/en-GB_kh0_sg.bin"}};
     void *mem = malloc(PICO_MEM);
-    if (!mem) return;
-    if (pico_initialize(mem, PICO_MEM, &ps)) return;
-    for (int v = 0; v < 2; v++) {
+    if (!mem) return -1;
+    int rc = pico_initialize(mem, PICO_MEM, &ps[v]);
+    if (rc) return rc;
+    rc = pico_createVoiceDefinition(ps[v], (const pico_Char *)vn[v]);
+    if (rc) return rc;
+    for (int k = 0; k < 2; k++) {
         pico_Resource r;
         pico_Char nm[PICO_MAX_RESOURCE_NAME_SIZE];
-        int bad = 0;
-        if (pico_createVoiceDefinition(ps, (const pico_Char *)vn[v])) continue;
-        for (int k = 0; k < 2; k++) {
-            if (pico_loadResource(ps, (const pico_Char *)fl[v][k], &r) ||
-                pico_getResourceName(ps, r, (char *)nm) ||
-                pico_addResourceToVoiceDefinition(ps, (const pico_Char *)vn[v], nm)) { bad = 1; break; }
-        }
-        if (!bad && !pico_newEngine(ps, (const pico_Char *)vn[v], &pe[v])) pico_ok[v] = 1;
+        rc = pico_loadResource(ps[v], (const pico_Char *)fl[v][k], &r);
+        if (rc) return rc;
+        rc = pico_getResourceName(ps[v], r, (char *)nm);
+        if (rc) return rc;
+        rc = pico_addResourceToVoiceDefinition(ps[v], (const pico_Char *)vn[v], nm);
+        if (rc) return rc;
     }
+    return pico_newEngine(ps[v], (const pico_Char *)vn[v], &pe[v]);
 }
 
 static void pico_say(int v, const char *txt) {
@@ -148,7 +192,7 @@ static void pico_say(int v, const char *txt) {
     const pico_Char *in = (const pico_Char *)txt;
     pico_Int16 rem = (pico_Int16)(strlen(txt) + 1), sent = 0, got = 0, dt = 0;
     int guard = 0;
-    while (rem > 0 && !g_abort && guard++ < 1000) {
+    while (rem > 0 && !g_abort && guard++ < 5000) {
         if (pico_putTextUtf8(e, in, rem, &sent)) break;
         in += sent; rem -= sent;
         int st;
@@ -171,23 +215,25 @@ static int es_cb(short *w, int n, espeak_EVENT *ev) {
 }
 #endif
 
-/* ---------------- рабочий поток ---------------- */
+/* ---------------- рабочий поток синтеза ---------------- */
 static int worker(SceSize args, void *argp) {
 #ifdef HAVE_PICO
-    pico_setup();
+    for (int v = 0; v < 2; v++) { pico_err[v] = pico_load(v); pico_ok[v] = (pico_err[v] == 0); }
 #endif
 #ifdef HAVE_ESPEAK
-    es_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, "app0:", 0);
+    es_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, "app0:", espeakINITIALIZE_DONT_EXIT);
     if (es_rate > 0) { espeak_SetSynthCallback(es_cb); es_ok = 1; }
 #endif
     g_ready = 1;
-    char last[32] = "";
+    char last[40] = "";
     for (;;) {
         if (!g_req) { sceKernelDelayThread(2000); continue; }
         g_busy = 1; g_req = 0;
         char t[HL], buf[HL + 100];
         snprintf(t, sizeof t, "%s", rq_text);
         out_begin();
+        unsigned h0 = rhead;
+        uint64_t t0 = sceKernelGetProcessTimeWide();
         if (rq_eng == 0) {
 #ifdef HAVE_PICO
             int v = atoi(rq_voice) & 1;
@@ -202,13 +248,18 @@ static int worker(SceSize args, void *argp) {
                 if (strcmp(last, rq_voice)) { espeak_SetVoiceByName(rq_voice); snprintf(last, sizeof last, "%s", rq_voice); }
                 int wpm = 170 * rq_speed / 100; if (wpm < 80) wpm = 80; if (wpm > 450) wpm = 450;
                 int pt = 50 * rq_pitch / 100; if (pt < 0) pt = 0; if (pt > 99) pt = 99;
-                espeak_SetParameter(espeakRATE, wpm, 0);
+                es_rc = espeak_SetParameter(espeakRATE, wpm, 0);
                 espeak_SetParameter(espeakPITCH, pt, 0);
+                espeak_SetParameter(espeakRANGE, rq_range, 0);
+                es_get = espeak_GetParameter(espeakRATE, 1);
                 espeak_Synth(t, strlen(t) + 1, 0, POS_CHARACTER, 0, espeakCHARS_UTF8, NULL, NULL);
             }
 #endif
         }
+        uint64_t t1 = sceKernelGetProcessTimeWide();
         out_finish();
+        g_synth_ms = (int)((t1 - t0) / 1000);
+        g_audio_ms = (int)((rhead - h0) / 48);
         g_busy = 0;
     }
     return 0;
@@ -281,7 +332,9 @@ static void clip(const char *s, char *d, int max) {
 typedef struct { const char *label; int eng; int arg; } Voice;
 static Voice ev[4];
 static int nev, cur;
-static int speed = 100, pitch = 100;
+static int speed = 100, pitch = 100, range = 50, style;
+static const char *stylev[] = {"", "+m3", "+m6", "+f2", "+f4", "+klatt3", "+klatt4"};
+#define NSTYLE 7
 static char hist[HN][HL];
 static int hn, sel;
 
@@ -294,7 +347,7 @@ static void hist_save(void) {
 static void hist_load(void) {
     FILE *f = fopen("ux0:data/vitatts.txt", "r");
     if (!f) return;
-    char b[HL];
+    static char b[HL];
     while (hn < HN && fgets(b, sizeof b, f)) {
         b[strcspn(b, "\r\n")] = 0;
         if (b[0]) snprintf(hist[hn++], HL, "%s", b);
@@ -314,19 +367,20 @@ static void hist_add(const char *t) {
 static void speak(const char *t) {
     if (!g_ready || !t[0]) return;
     int lang = detect(t), eng;
-    char vn[32];
-    if (lang == 1) { eng = 1; strcpy(vn, "ru"); }
-    else if (lang == 2) { eng = 1; strcpy(vn, "ja"); }
+    char vn[40];
+    if (lang == 1) { eng = 1; snprintf(vn, sizeof vn, "ru%s", stylev[style]); }
+    else if (lang == 2) { eng = 1; snprintf(vn, sizeof vn, "ja%s", stylev[style]); }
     else {
         eng = ev[cur].eng;
-        if (eng == 0) snprintf(vn, sizeof vn, "%d", ev[cur].arg); else strcpy(vn, "en-us");
+        if (eng == 0) snprintf(vn, sizeof vn, "%d", ev[cur].arg);
+        else snprintf(vn, sizeof vn, "en-us%s", stylev[style]);
     }
     g_abort = 1;
     g_flush = 1;
     while (g_busy) sceKernelDelayThread(500);
     snprintf(rq_text, sizeof rq_text, "%s", t);
     snprintf(rq_voice, sizeof rq_voice, "%s", vn);
-    rq_eng = eng; rq_speed = speed; rq_pitch = pitch;
+    rq_eng = eng; rq_speed = speed; rq_pitch = pitch; rq_range = range;
     g_abort = 0;
     g_req = 1;
 }
@@ -343,16 +397,16 @@ static void T(int x, int y, unsigned c, float s, const char *fmt, ...) {
 static int ime(const char *init, char *out, int outsz) {
     static uint16_t title[] = {'T', 'e', 'x', 't', 0};
     static uint16_t ini[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1], buf[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1];
-    u8to16(init, ini, 125);
+    u8to16(init, ini, IMEMAX + 5);
     memset(buf, 0, sizeof buf);
     SceImeDialogParam p;
     sceImeDialogParamInit(&p);
     p.supportedLanguages = 0;
     p.languagesForced = 0;
     p.type = SCE_IME_TYPE_DEFAULT;
-    p.option = 0;
+    p.option = 1;                     /* многострочное окно */
     p.title = title;
-    p.maxTextLength = 120;
+    p.maxTextLength = IMEMAX;
     p.initialText = ini;
     p.inputTextBuffer = buf;
     if (sceImeDialogInit(&p) < 0) return 0;
@@ -381,7 +435,14 @@ static int ime(const char *init, char *out, int outsz) {
 #define COL_BOX  RGBA8(40, 40, 60, 255)
 #define COL_SEL  RGBA8(0, 90, 80, 255)
 
+static const char *pst(int v, char *b) {
+    if (pico_ok[v]) return "ok";
+    sprintf(b, "err%d", pico_err[v]);
+    return b;
+}
+
 int main(void) {
+    ker_init();
     vita2d_init();
     vita2d_set_clear_color(COL_BG);
     font = vita2d_load_custom_pvf("sa0:data/font/pvf/jpn0.pvf");
@@ -400,40 +461,51 @@ int main(void) {
     hist_load();
 
     aport = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, 48000, SCE_AUDIO_OUT_MODE_MONO);
-    SceUID ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0, NULL);
+    SceUID ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0x40000, NULL);
+    if (ath < 0) ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0, NULL);
     if (ath < 0) ath = sceKernelCreateThread("aud", audio_thread, 0x10000100, 0x10000, 0, 0, NULL);
     sceKernelStartThread(ath, 0, NULL);
 
-    SceUID th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0, NULL);
+    SceUID th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0x20000, NULL);
+    if (th < 0) th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0, NULL);
     sceKernelStartThread(th, 0, NULL);
 
     SceCtrlData pad;
     unsigned old = 0;
     int tprev = 0;
-    char buf[HL];
+    static char buf[HL];
 
     for (;;) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
         unsigned pr = pad.buttons & ~old;
         old = pad.buttons;
+        int selh = (pad.buttons & SCE_CTRL_SELECT) != 0;
 
         SceTouchData td;
         sceTouchPeek(SCE_TOUCH_PORT_FRONT, &td, 1);
         int tnow = td.reportNum > 0;
-        int tap = tnow && !tprev, tx = 0, ty = 0;
-        if (tap) { tx = td.report[0].x / 2; ty = td.report[0].y / 2; }
+        int tap = tnow && !tprev, ty = 0;
+        if (tap) ty = td.report[0].y / 2;
         tprev = tnow;
-        (void)tx;
 
         int do_new = 0, do_edit = 0;
         if (pr & SCE_CTRL_START) break;
-        if (pr & SCE_CTRL_LTRIGGER) cur = (cur + nev - 1) % nev;
-        if (pr & SCE_CTRL_RTRIGGER) cur = (cur + 1) % nev;
-        if (pr & SCE_CTRL_UP) { if (sel > 0) sel--; }
-        if (pr & SCE_CTRL_DOWN) { if (sel < hn - 1) sel++; }
+        if (pr & SCE_CTRL_LTRIGGER) {
+            if (selh) style = (style + NSTYLE - 1) % NSTYLE; else cur = (cur + nev - 1) % nev;
+        }
+        if (pr & SCE_CTRL_RTRIGGER) {
+            if (selh) style = (style + 1) % NSTYLE; else cur = (cur + 1) % nev;
+        }
+        if (pr & (SCE_CTRL_UP | SCE_CTRL_DOWN)) {
+            if (selh) {
+                range += (pr & SCE_CTRL_UP) ? 10 : -10;
+                if (range < 0) range = 0; if (range > 100) range = 100;
+            } else if (pr & SCE_CTRL_UP) { if (sel > 0) sel--; }
+            else { if (sel < hn - 1) sel++; }
+        }
         if (pr & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) {
             int d = (pr & SCE_CTRL_RIGHT) ? 10 : -10;
-            if (pad.buttons & SCE_CTRL_SELECT) { pitch += d; if (pitch < 50) pitch = 50; if (pitch > 200) pitch = 200; }
+            if (selh) { pitch += d; if (pitch < 50) pitch = 50; if (pitch > 200) pitch = 200; }
             else { speed += d; if (speed < 50) speed = 50; if (speed > 250) speed = 250; }
         }
         if (pr & SCE_CTRL_SQUARE) { g_abort = 1; g_flush = 1; }
@@ -458,27 +530,26 @@ int main(void) {
         vita2d_clear_screen();
         T(20, 34, COL_ACC, 1.3f, "VitaTTS");
         T(180, 34, COL_DIM, 0.9f, "%s", g_ready ? ((g_busy || g_play) ? "SPEAKING" : "ready") : "loading...");
-        T(20, 66, COL_TXT, 0.95f, "EN voice (L/R): %s", ev[cur].label);
-        T(20, 92, COL_TXT, 0.95f, "Speed %d%%   Pitch %d%%   RU/JA auto-detect: %s", speed, pitch,
-#ifdef HAVE_ESPEAK
-          "eSpeak"
-#else
-          "unavailable"
-#endif
-        );
+        T(20, 66, COL_TXT, 0.95f, "EN voice (L/R): %s    eSpeak style (Sel+L/R): %s", ev[cur].label, stylev[style][0] ? stylev[style] : "default");
+        T(20, 92, COL_TXT, 0.95f, "Speed %d%%   Pitch %d%%   Range %d  (eSpeak: lively 100 .. robotic 0)", speed, pitch, range);
         vita2d_draw_rectangle(20, 110, 920, 46, COL_BOX);
         T(34, 142, COL_ACC, 1.1f, "[X] / tap here: type a phrase and speak");
         for (int i = 0; i < HN; i++) {
             int y = 170 + i * 58;
             vita2d_draw_rectangle(20, y, 920, 52, (i == sel && hn) ? COL_SEL : COL_BOX);
             if (i < hn) {
-                char c[HL];
+                char c[100];
                 clip(hist[i], c, 70);
                 T(32, y + 34, COL_TXT, 1.1f, "%d  %s", i + 1, c);
             } else T(32, y + 34, COL_DIM, 1.0f, "%d  -", i + 1);
         }
-        T(20, 504, COL_DIM, 0.8f, "X new  O repeat  Triangle edit  Square stop  Up/Down history  Left/Right speed");
-        T(20, 528, COL_DIM, 0.8f, "Select+Left/Right pitch   L/R English voice   tap a row = speak   START exit");
+        {
+            char b1[16], b2[16];
+            T(20, 482, COL_DIM, 0.7f, "Pico US:%s UK:%s eSpeak:%s | synth %d ms / audio %d ms | underruns %d | rate set=%d get=%d",
+              pst(0, b1), pst(1, b2), es_ok ? "ok" : "no", g_synth_ms, g_audio_ms, g_under, es_rc, es_get);
+        }
+        T(20, 506, COL_DIM, 0.8f, "X new  O repeat  Triangle edit  Square stop  Up/Down history  Left/Right speed");
+        T(20, 528, COL_DIM, 0.8f, "Select+Left/Right pitch  Select+Up/Down range  L/R voice  Select+L/R style  START exit");
         vita2d_end_drawing();
         vita2d_swap_buffers();
     }
