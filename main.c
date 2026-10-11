@@ -69,34 +69,9 @@ static void speak_text(const char *text) {
     sceAudioOutReleasePort(port);
 }
 
-// Рисуем интерфейс
-static void draw_ui(vita2d_pgf *font) {
-    vita2d_start_drawing();
-    vita2d_clear_screen();
-
-    vita2d_pgf_draw_text(font, 20, 40, RGBA8(255, 255, 255, 255), 1.0f, "Vita Simple TTS");
-
-    // Рисуем текст в рамке
-    vita2d_draw_rectangle(20, 60, 920, 40, RGBA8(40, 40, 60, 255)); // Фон поля
-    vita2d_pgf_draw_text(font, 30, 90, RGBA8(255, 255, 255, 255), 1.0f, text_buffer);
-
-    // Подсказки
-    vita2d_pgf_draw_text(font, 20, 140, RGBA8(200, 200, 100, 255), 1.0f, "CONTROLS:");
-    vita2d_pgf_draw_text(font, 20, 170, RGBA8(180, 180, 180, 255), 1.0f, "START   - Speak text");
-    vita2d_pgf_draw_text(font, 20, 190, RGBA8(180, 180, 180, 255), 1.0f, "CIRCLE  - Clear text");
-    vita2d_pgf_draw_text(font, 20, 210, RGBA8(180, 180, 180, 255), 1.0f, "TRIANGLE- Reset to default text");
-
-    vita2d_pgf_draw_text(font, 20, 260, RGBA8(150, 150, 150, 255), 1.0f, "Press START to hear the voice.");
-
-    vita2d_end_drawing();
-    vita2d_swap_buffers();
-}
-
 int main(void) {
-    // Инициализация графики
     vita2d_init();
-    vita2d_pgf *font = vita2d_load_default_pgf();
-    vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
+    vita2d_set_clear_color(RGBA8(20, 20, 40, 255));
 
     SceCtrlData pad;
     int prev_start = 0;
@@ -125,13 +100,31 @@ int main(void) {
         prev_circle   = circle_now;
         prev_triangle = triangle_now;
 
-        // Рисуем интерфейс каждый кадр
-        draw_ui(font);
+        // Рисуем только цветные индикаторы, без текста
+        vita2d_start_drawing();
+        vita2d_clear_screen();
 
-        sceKernelDelayThread(16000); // ~60 FPS
+        // Верхняя полоса — заголовок приложения
+        vita2d_draw_rectangle(20, 20, 920, 60, RGBA8(60, 60, 120, 255));
+
+        // Блок "текущий текст" — если пусто, рисуем серый, если нет — зелёный
+        if (text_buffer[0] == '\0') {
+            vita2d_draw_rectangle(20, 100, 920, 100, RGBA8(80, 80, 80, 255));
+        } else {
+            vita2d_draw_rectangle(20, 100, 920, 100, RGBA8(60, 120, 60, 255));
+        }
+
+        // Индикаторы кнопок внизу
+        vita2d_draw_rectangle(20, 400, 200, 80, RGBA8(120, 60, 60, 255));   // START
+        vita2d_draw_rectangle(240, 400, 200, 80, RGBA8(120, 120, 60, 255)); // CIRCLE
+        vita2d_draw_rectangle(460, 400, 200, 80, RGBA8(60, 120, 120, 255)); // TRIANGLE
+
+        vita2d_end_drawing();
+        vita2d_swap_buffers();
+
+        sceKernelDelayThread(16000);
     }
 
-    vita2d_free_pgf(font);
     vita2d_fini();
     sceKernelExitProcess(0);
     return 0;
