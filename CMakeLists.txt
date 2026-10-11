@@ -1,17 +1,22 @@
 cmake_minimum_required(VERSION 3.10)
-project(vita-simple-tts C)
+project(vita-sam-tts C)
 
-set(VITA_APP_NAME "Vita Simple TTS")
-set(VITA_TITLEID  "TTSA00003")
+set(VITA_APP_NAME "Vita SAM TTS")
+set(VITA_TITLEID  "TTSA00004")
 set(VITA_VERSION  "01.00")
 
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
-add_executable(vita-simple-tts main.c)
+# Добавляем исходники SAM
+add_executable(vita-sam-tts
+    main.c
+    sam.c
+    reciter.c
+)
 
-target_link_libraries(vita-simple-tts
+target_link_libraries(vita-sam-tts
     SceCtrl_stub
     SceAudio_stub
     SceKernelThreadMgr_stub
@@ -22,8 +27,8 @@ target_link_libraries(vita-simple-tts
     c
 )
 
-vita_create_self(vita-simple-tts.self vita-simple-tts)
-vita_create_vpk(vita-simple-tts.vpk ${VITA_TITLEID} vita-simple-tts.self
+vita_create_self(vita-sam-tts.self vita-sam-tts)
+vita_create_vpk(vita-sam-tts.vpk ${VITA_TITLEID} vita-sam-tts.self
     VERSION ${VITA_VERSION}
     NAME ${VITA_APP_NAME}
 )
