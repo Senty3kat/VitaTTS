@@ -107,7 +107,7 @@ jobs:
           if [ $OK = 0 ]; then
             for f in log_*.txt; do
               echo "########## $f (вариант: $(cat ${f%.txt}.name))"
-              grep -E "error|undefined reference|CMake Error|No such file" $f | head -12
+              grep -E "error|undefined reference|CMake Error|In file included from" $f | head -24
             done
             exit 1
           fi
