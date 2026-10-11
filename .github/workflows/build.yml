@@ -1,0 +1,110 @@
+name: Build VPK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      VITASDK: /usr/local/vitasdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake make git autoconf automake libtool pkg-config python3 curl xz-utils
+
+      - name: VitaSDK + vita2d
+        run: |
+          sudo mkdir -p $VITASDK
+          sudo chown -R $USER $VITASDK
+          git clone --depth 1 https://github.com/vitasdk/vdpm
+          cd vdpm
+          ./bootstrap-vitasdk.sh
+          export PATH=$VITASDK/bin:$PATH
+          ./install-all.sh
+
+      - name: eSpeak-NG (исходники + данные языков)
+        continue-on-error: true
+        run: |
+          mkdir -p payload
+          git clone --depth 1 --branch 1.51.1 https://github.com/espeak-ng/espeak-ng
+          cd espeak-ng
+          ./autogen.sh
+          ./configure --prefix=/usr --without-async --without-mbrola --without-sonic --without-pcaudiolib --without-speechplayer
+          make -j4
+          make install DESTDIR=$GITHUB_WORKSPACE/inst
+          cd ..
+          D=$(find inst -type d -name espeak-ng-data | head -1)
+          cp -r "$D" payload/espeak-ng-data
+          find payload/espeak-ng-data -maxdepth 1 -name '*_dict' ! -name ru_dict ! -name en_dict ! -name ja_dict -delete
+          rm -rf payload/espeak-ng-data/mbrola_ph
+
+      - name: Pico / SVOX (исходники + голоса)
+        continue-on-error: true
+        run: |
+          mkdir -p payload
+          git clone --depth 1 https://github.com/naggety/picotts
+          for f in en-US_ta.bin en-US_lh0_sg.bin en-GB_ta.bin en-GB_kh0_sg.bin; do
+            cp "$(find picotts -name $f | head -1)" payload/
+          done
+
+      - name: Иконка
+        run: |
+          python3 - <<'EOF'
+          import zlib, struct, math
+          W = 128
+          pix = [[0] * W for _ in range(W)]
+          for x in range(W):
+              y = int(64 + 32 * math.sin(x / 128 * 2 * math.pi * 3) * (1 - abs(x - 64) / 80))
+              for d in range(-2, 3):
+                  if 0 <= y + d < W:
+                      pix[y + d][x] = 1
+          raw = b''.join(b'\x00' + bytes(r) for r in pix)
+          def ch(t, d):
+              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+          png = (b'\x89PNG\r\n\x1a\n'
+                 + ch(b'IHDR', struct.pack('>IIBBBBB', W, W, 8, 3, 0, 0, 0))
+                 + ch(b'PLTE', bytes([24, 24, 40, 0, 230, 170]))
+                 + ch(b'IDAT', zlib.compress(raw))
+                 + ch(b'IEND', b''))
+          open('icon0.png', 'wb').write(png)
+          EOF
+
+      - name: Сборка VPK (с запасными вариантами)
+        run: |
+          export PATH=$VITASDK/bin:$PATH
+          [ -f payload/en-US_ta.bin ] && P=1 || P=0
+          [ -f payload/espeak-ng-data/phontab ] && E=1 || E=0
+          PL=$(dirname "$(find picotts -name picoapi.h 2>/dev/null | head -1)")
+          PL=$(realpath "$PL" 2>/dev/null || echo "$PL")
+          OK=0
+          for c in "1 1 0" "1 1 1" "1 0 0" "0 1 0"; do
+            set -- $c
+            [ "$1" = 1 ] && [ $P = 0 ] && continue
+            [ "$2" = 1 ] && [ $E = 0 ] && continue
+            echo "=== Пробую: pico=$1 espeak=$2 mbrowrap=$3 ==="
+            rm -rf build; mkdir build; cd build
+            if cmake .. -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
+                 -DCMAKE_BUILD_TYPE=Release \
+                 -DWITH_PICO=$([ $1 = 1 ] && echo ON || echo OFF) \
+                 -DWITH_ESPEAK=$([ $2 = 1 ] && echo ON || echo OFF) \
+                 -DWITH_MBROWRAP=$([ $3 = 1 ] && echo ON || echo OFF) \
+                 -DPICO_LIB="$PL" \
+                 -DESPEAK_DIR=$GITHUB_WORKSPACE/espeak-ng \
+                 -DPAYLOAD=$GITHUB_WORKSPACE/payload \
+                 -DICON=$GITHUB_WORKSPACE/icon0.png \
+               && make -j4 ; then
+              cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2" ; break
+            fi
+            cd ..
+          done
+          test $OK = 1
+          ls -la build/*.vpk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VitaTTS-vpk
+          path: build/VitaTTS.vpk
