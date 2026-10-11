@@ -1,7 +1,10 @@
 #include "debugScreen.h"
-#include <psp2/kernel/clib.h>
+#include <psp2/display.h>
+#include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #define SCREEN_W 960
 #define SCREEN_H 544
@@ -15,15 +18,8 @@ static SceUID g_fb_uid = -1;
 static int g_cursor_x = 0;
 static int g_cursor_y = 0;
 
-// Встроенный шрифт 8x16 (ASCII 32..127) — очень компактный, только заглавные и цифры,
-// для строчных используем те же глифы. Для нашего случая достаточно.
-static const unsigned char font8x16[96][16] = {
-    // Заглушка — рисуем прямоугольники. Реальный шрифт заменим ниже простой логикой.
-    [0 ... 95] = {0}
-};
-
-// Простой рендер символа: рисуем 8x8 пиксельный блок на основе битов кода символа.
-// Это не настоящий шрифт, но даёт видимые символы на экране.
+// Упрощённый рендер: рисуем точки по битам кода символа.
+// Не настоящий шрифт, но текст визуально различим.
 static void draw_char(int x, int y, unsigned char c, unsigned int color) {
     for (int row = 0; row < CHAR_H; row++) {
         for (int col = 0; col < CHAR_W; col++) {
@@ -44,6 +40,7 @@ void psvDebugScreenInit() {
     g_fb_uid = sceKernelAllocMemBlock("debug_fb",
         SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
         SCREEN_W * SCREEN_H * 4, NULL);
+
     sceKernelGetMemBlockBase(g_fb_uid, (void **)&g_fb);
 
     SceDisplayFrameBuf fb;
@@ -64,7 +61,7 @@ void psvDebugScreenInit() {
 
 void psvDebugScreenClear() {
     if (!g_fb) return;
-    unsigned int black = 0xFF000000; // A8B8G8R8 — чёрный
+    unsigned int black = 0xFF000000;
     unsigned int *p = (unsigned int *)g_fb;
     for (int i = 0; i < SCREEN_W * SCREEN_H; i++) p[i] = black;
     g_cursor_x = 0;
@@ -97,7 +94,6 @@ int psvDebugScreenPrintf(const char *format, ...) {
         int px = g_cursor_x * CHAR_W;
         int py = g_cursor_y * CHAR_H;
         if (py + CHAR_H > SCREEN_H) {
-            // Скролл не делаем — просто останавливаемся
             break;
         }
         draw_char(px, py, (unsigned char)c, white);
