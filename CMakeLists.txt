@@ -2,18 +2,22 @@ cmake_minimum_required(VERSION 3.10)
 project(vita-simple-tts C)
 
 set(VITA_APP_NAME "Vita Simple TTS")
-set(VITA_TITLEID  "ROBO12345")
+set(VITA_TITLEID  "TTSA00001")
 set(VITA_VERSION  "01.00")
 
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
-add_executable(vita-simple-tts main.c)
+add_executable(vita-simple-tts
+    main.c
+    debugScreen.c
+)
 
 target_link_libraries(vita-simple-tts
     SceCtrl_stub
     SceAudio_stub
+    SceDisplay_stub
     SceKernelDmacMgr_stub
     SceAppMgr_stub
     SceSysmodule_stub
