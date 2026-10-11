@@ -1,127 +1,109 @@
 #include <psp2/ctrl.h>
+#include <psp2/ime.h>
 #include <psp2/kernel/processmgr.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "debugScreen.h"
 #include "soloud.h"
 #include "soloud_speech.h"
 
-static SoLoud::Soloud soloud;
-static SoLoud::Speech speech;
+#define printf psvDebugScreenPrintf
 
-static const char* phrases[] = {
-    "Hello world.",
-    "I am a machine. I can speak.",
-    "This is a synthetic voice.",
-    "The future is artificial.",
-    "Repeat this sentence again and again."
-};
+SoLoud::Soloud gSoloud;
+SoLoud::Speech gSpeech;
 
-static const int phraseCount =
-    sizeof(phrases) / sizeof(phrases[0]);
+// Буфер для текста (IME пишет сюда)
+static char text_buffer[512] = "Hello PS Vita";
+static SceImeParam ime_param;
 
-static int selectedEngine = 0;
-static int selectedPhrase = 0;
+// Флаг: открыта ли клавиатура
+static volatile int ime_active = 0;
 
-static void drawMenu()
-{
-    psvDebugScreenClear();
-
-    psvDebugScreenPrintf("VitaTTS\n");
-    psvDebugScreenPrintf("==============================\n\n");
-
-    psvDebugScreenPrintf("TTS ENGINE\n");
-    psvDebugScreenPrintf(
-        "%s SoLoud Speech\n",
-        selectedEngine == 0 ? ">" : " "
-    );
-    psvDebugScreenPrintf(
-        "%s eSpeak Classic\n",
-        selectedEngine == 1 ? ">" : " "
-    );
-
-    psvDebugScreenPrintf("\nTEXT PRESET\n");
-    psvDebugScreenPrintf("%s\n\n", phrases[selectedPhrase]);
-
-    psvDebugScreenPrintf("CONTROLS\n");
-    psvDebugScreenPrintf("LEFT / RIGHT : Select engine\n");
-    psvDebugScreenPrintf("UP / DOWN    : Select phrase\n");
-    psvDebugScreenPrintf("CROSS        : Speak\n");
-    psvDebugScreenPrintf("CIRCLE       : Stop\n");
-    psvDebugScreenPrintf("START        : Exit\n\n");
-
-    psvDebugScreenPrintf("Audio is generated in memory.\n");
-    psvDebugScreenPrintf("No WAV files are created.\n");
-
-    if (selectedEngine == 1) {
-        psvDebugScreenPrintf(
-            "\neSpeak Classic is not connected yet.\n"
-        );
+// Колбэк IME — вызывается когда ввод завершён или отменён
+static void ime_handler(void *arg, const SceImeEventData *e) {
+    if (e->id == SCE_IME_EVENT_PRESS_ENTER) {
+        // ENTER = ввод завершён
+        ime_active = 0;
+    } else if (e->id == SCE_IME_EVENT_PRESS_CLOSE) {
+        // Закрытие клавиатуры
+        ime_active = 0;
     }
 }
 
-int main()
-{
+static void open_keyboard(void) {
+    sceImeParamInit(&ime_param);
+    ime_param.supportedLanguages = SCE_IME_LANGUAGE_ENGLISH;
+    ime_param.languagesForced = SCE_TRUE;
+    ime_param.type = SCE_IME_TYPE_DEFAULT;
+    ime_param.option = SCE_IME_OPTION_NO_ASSISTANCE;
+    ime_param.inputTextBuffer = text_buffer;
+    ime_param.maxTextLength = sizeof(text_buffer) - 1;
+    ime_param.handler = ime_handler;
+    ime_param.arg = NULL;
+    ime_param.initialText = text_buffer;
+    ime_param.title = "TTS Input";
+
+    ime_active = 1;
+    sceImeOpen(&ime_param);
+}
+
+int main(void) {
     psvDebugScreenInit();
 
-    if (soloud.init() != SoLoud::SO_NO_ERROR) {
-        psvDebugScreenPrintf("SoLoud initialization failed.\n");
-        sceKernelDelayThread(3000000);
-        sceKernelExitProcess(1);
-        return 1;
-    }
+    // Инициализация SoLoud
+    gSoloud.init();
+    printf("SoLoud TTS Ready!\n");
+    printf("SQUARE: Open keyboard\n");
+    printf("START: Speak text\n\n");
+    printf("Current text: %s\n", text_buffer);
 
     SceCtrlData pad;
-    uint32_t previousButtons = 0;
+    int prev_square = 0;
+    int prev_start = 0;
 
-    while (true) {
-        sceCtrlPeekBufferPositive(&pad, 1);
-
-        const uint32_t pressed =
-            pad.buttons & ~previousButtons;
-
-        previousButtons = pad.buttons;
-
-        if (pressed & SCE_CTRL_LEFT) {
-            selectedEngine = 0;
+    while (1) {
+        // Если клавиатура активна — обновляем IME и не читаем геймпад
+        if (ime_active) {
+            sceImeUpdate();
+            sceKernelDelayThread(10000);
+            continue;
         }
 
-        if (pressed & SCE_CTRL_RIGHT) {
-            selectedEngine = 1;
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+
+        int square_now = (pad.buttons & SCE_CTRL_SQUARE);
+        int start_now = (pad.buttons & SCE_CTRL_START);
+
+        // SQUARE нажатие (фронт) — открыть клавиатуру
+        if (square_now && !prev_square) {
+            printf("Opening keyboard...\n");
+            open_keyboard();
         }
 
-        if (pressed & SCE_CTRL_UP) {
-            selectedPhrase =
-                (selectedPhrase + phraseCount - 1)
-                % phraseCount;
-        }
-
-        if (pressed & SCE_CTRL_DOWN) {
-            selectedPhrase =
-                (selectedPhrase + 1) % phraseCount;
-        }
-
-        if (pressed & SCE_CTRL_CIRCLE) {
-            soloud.stopAll();
-        }
-
-        if (pressed & SCE_CTRL_CROSS) {
-            if (selectedEngine == 0) {
-                soloud.stopAll();
-                speech.setText(phrases[selectedPhrase]);
-                soloud.play(speech);
+        // START нажатие — произнести текст
+        if (start_now && !prev_start) {
+            if (strlen(text_buffer) > 0) {
+                printf("Speaking: %s\n", text_buffer);
+                gSpeech.setText(text_buffer);
+                gSoloud.play(gSpeech);
             }
         }
 
-        if (pressed & SCE_CTRL_START) {
-            break;
-        }
+        prev_square = square_now;
+        prev_start = start_now;
 
-        drawMenu();
-        sceKernelDelayThread(16000);
+        // Обновляем экран
+        psvDebugScreenClear();
+        printf("SoLoud TTS\n\n");
+        printf("Text: %s\n\n", text_buffer);
+        printf("SQUARE: Open keyboard\n");
+        printf("START: Speak\n");
+
+        sceKernelDelayThread(50000); // 20 FPS достаточно
     }
 
-    soloud.deinit();
+    gSoloud.deinit();
     sceKernelExitProcess(0);
-
     return 0;
 }
