@@ -1,0 +1,39 @@
+name: Build VitaTTS
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+
+    steps:
+      - name: Checkout VitaTTS
+        uses: actions/checkout@v4
+
+      - name: Get VitaSDK common files
+        run: |
+          git clone --depth 1 \
+            https://github.com/vitasdk/samples.git \
+            /tmp/vitasdk-samples
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+            -DVITA_SAMPLES_DIR=/tmp/vitasdk-samples
+
+      - name: Compile
+        run: cmake --build build --parallel 2
+
+      - name: Upload VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VitaTTS
+          path: build/VitaTTS.vpk
+          if-no-files-found: error
