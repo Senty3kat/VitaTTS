@@ -9,11 +9,12 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
-# Добавляем исходники SAM
+# Добавляем все исходники SAM
 add_executable(vita-sam-tts
     main.c
     sam.c
     reciter.c
+    render.c
 )
 
 target_link_libraries(vita-sam-tts
