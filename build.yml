@@ -1,39 +1,29 @@
-name: Build VitaTTS
+name: Build Vita TTS VPK
 
 on:
   push:
+    branches: [ main ]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: vitasdk/vitasdk:latest
+    container:
+      image: vitasdk/vitasdk:2026.08
 
     steps:
-      - name: Checkout VitaTTS
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Get VitaSDK common files
+      - name: Build
         run: |
-          git clone --depth 1 \
-            https://github.com/vitasdk/samples.git \
-            /tmp/vitasdk-samples
-
-      - name: Configure
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-            -DVITA_SAMPLES_DIR=/tmp/vitasdk-samples
-
-      - name: Compile
-        run: cmake --build build --parallel 2
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
 
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: VitaTTS
-          path: build/VitaTTS.vpk
-          if-no-files-found: error
+          name: vita-tts-vpk
+          path: build/vita-tts-test.vpk
