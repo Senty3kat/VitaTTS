@@ -1,18 +1,22 @@
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/audioout.h>
+#include <psp2/display.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 
+#include "debugScreen.h"
+
+#define printf psvDebugScreenPrintf
+
 #define SAMPLE_RATE 44100
 #define BUFFER_SIZE 1024
 
-// Текст задаётся прямо здесь — IME пока не используем
 static char text_buffer[256] = "Hello World From Vita";
 
-// --- Параметры синтезатора ---
+// Форманты для "гласных" звуков
 static int formant_freqs[][3] = {
     {730, 1090, 2440},
     {530, 1840, 2480},
@@ -70,21 +74,56 @@ static void speak_text(const char *text) {
     sceAudioOutReleasePort(port);
 }
 
+static void draw_screen(void) {
+    psvDebugScreenClear();
+    printf("=================================\n");
+    printf("        Vita Simple TTS\n");
+    printf("=================================\n\n");
+    printf("Current text:\n");
+    printf("  \"%s\"\n\n", text_buffer);
+    printf("---------------------------------\n");
+    printf("CONTROLS:\n");
+    printf("  START   - Speak text\n");
+    printf("  SQUARE  - (reserved for keyboard)\n");
+    printf("  CIRCLE  - Clear text\n");
+    printf("  TRIANGLE- Reset to default text\n");
+    printf("---------------------------------\n\n");
+    printf("Press START to hear the voice.\n");
+}
+
 int main(void) {
+    psvDebugScreenInit();
+
     SceCtrlData pad;
     int prev_start = 0;
+    int prev_circle = 0;
+    int prev_triangle = 0;
 
-    // Произносим сразу при запуске, чтобы проверить звук
-    speak_text(text_buffer);
+    draw_screen();
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
-        int start_now = (pad.buttons & SCE_CTRL_START);
+
+        int start_now    = (pad.buttons & SCE_CTRL_START)    ? 1 : 0;
+        int circle_now   = (pad.buttons & SCE_CTRL_CIRCLE)   ? 1 : 0;
+        int triangle_now = (pad.buttons & SCE_CTRL_TRIANGLE) ? 1 : 0;
 
         if (start_now && !prev_start) {
             speak_text(text_buffer);
         }
-        prev_start = start_now;
+        if (circle_now && !prev_circle) {
+            text_buffer[0] = '\0';
+            draw_screen();
+        }
+        if (triangle_now && !prev_triangle) {
+            strncpy(text_buffer, "Hello World From Vita", sizeof(text_buffer) - 1);
+            text_buffer[sizeof(text_buffer) - 1] = '\0';
+            draw_screen();
+        }
+
+        prev_start    = start_now;
+        prev_circle   = circle_now;
+        prev_triangle = triangle_now;
 
         sceKernelDelayThread(50000);
     }
