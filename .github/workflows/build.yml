@@ -11,12 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake make git autoconf automake libtool pkg-config python3 curl xz-utils
+      # ---------- VitaSDK (кеш) ----------
+      - name: Restore VitaSDK cache
+        id: cvita
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/vitasdk
+          key: vitasdk-2026.08-libvita2d-v1
 
       - name: VitaSDK + vita2d
+        id: vinst
+        if: steps.cvita.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/vitasdk/vdpm
           cd vdpm
@@ -24,12 +29,34 @@ jobs:
           export PATH=$VITASDK/bin:$PATH
           vdpm pacman -- -S --noconfirm libvita2d || (yes | vdpm install libvita2d || true)
           test -f $VITASDK/arm-vita-eabi/lib/libvita2d.a
-          ls $VITASDK/arm-vita-eabi/lib | head -80
+          echo "ok=1" >> $GITHUB_OUTPUT
+
+      - name: Save VitaSDK cache
+        if: steps.vinst.outputs.ok == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/vitasdk
+          key: vitasdk-2026.08-libvita2d-v1
+
+      # ---------- eSpeak-NG (кеш исходников и данных) ----------
+      - name: Restore eSpeak cache
+        id: cesp
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            espeak-ng
+            payload/espeak-ng-data
+          key: espeak-1.51.1-v1
 
       - name: eSpeak-NG (исходники + данные языков)
+        id: einst
+        if: steps.cesp.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config make
           mkdir -p payload
+          rm -rf espeak-ng
           git clone --depth 1 --branch 1.51.1 https://github.com/espeak-ng/espeak-ng
           cd espeak-ng
           ./autogen.sh
@@ -38,12 +65,24 @@ jobs:
           make install DESTDIR=$GITHUB_WORKSPACE/inst
           cd ..
           D=$(find inst -type d -name espeak-ng-data | head -1)
+          rm -rf payload/espeak-ng-data
           cp -r "$D" payload/espeak-ng-data
           find payload/espeak-ng-data -maxdepth 1 -name '*_dict' ! -name ru_dict ! -name en_dict ! -name ja_dict -delete
           rm -rf payload/espeak-ng-data/mbrola_ph
           find payload -name '* *' -print -delete
-          find payload -type f | wc -l
+          test -f payload/espeak-ng-data/phontab
+          echo "ok=1" >> $GITHUB_OUTPUT
 
+      - name: Save eSpeak cache
+        if: steps.einst.outputs.ok == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            espeak-ng
+            payload/espeak-ng-data
+          key: espeak-1.51.1-v1
+
+      # ---------- Pico ----------
       - name: Pico / SVOX (исходники + голоса)
         continue-on-error: true
         run: |
