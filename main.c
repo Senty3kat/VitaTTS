@@ -35,38 +35,81 @@ static int rq_eng, rq_speed = 100, rq_pitch = 100;
 static char rq_voice[32];
 static int pico_ok[2], es_ok;
 
-/* ---------------- вывод звука + ресемплер в 48 кГц ---------------- */
+/* ---------------- вывод звука: кольцевой буфер + отдельный аудиопоток ---------------- */
+#define RING (1 << 20)          /* ~21 c при 48 кГц */
+#define PREBUF 14400            /* 0.3 c предбуфер: скрывает паузы синтеза */
 static int aport = -1;
-static short ob[GRAIN];
-static int on;
+static short ring[RING];
+static volatile unsigned rhead, rtail;
+static volatile int g_flush, g_done, g_play;
 static double rt;
 static short rprev;
 
-static void out_begin(void) { on = 0; rt = 0; rprev = 0; }
+static int audio_thread(SceSize args, void *argp) {
+    static short ab[GRAIN];
+    int playing = 0;
+    for (;;) {
+        if (g_flush) { rtail = rhead; playing = 0; g_play = 0; g_flush = 0; continue; }
+        unsigned avail = rhead - rtail;
+        if (!playing) {
+            if (avail >= PREBUF || (g_done && avail > 0)) playing = 1;
+            else { sceKernelDelayThread(1000); continue; }
+        }
+        g_play = 1;
+        if (avail >= GRAIN) {
+            __sync_synchronize();
+            for (int i = 0; i < GRAIN; i++) ab[i] = ring[(rtail + i) & (RING - 1)];
+            rtail += GRAIN;
+            if (aport >= 0) sceAudioOutOutput(aport, ab);
+        } else if (g_done) {
+            avail = rhead - rtail;
+            if (avail >= GRAIN) continue;
+            memset(ab, 0, sizeof ab);
+            for (unsigned i = 0; i < avail; i++) ab[i] = ring[(rtail + i) & (RING - 1)];
+            rtail += avail;
+            if (avail && aport >= 0) sceAudioOutOutput(aport, ab);
+            playing = 0; g_play = 0;
+        } else {
+            sceKernelDelayThread(1000);   /* недогруз: ждём синтез, а не трещим */
+        }
+    }
+    return 0;
+}
+
+static void out_begin(void) {
+    rt = 0; rprev = 0; g_done = 0;
+    g_flush = 1;
+    for (int i = 0; g_flush && i < 300; i++) sceKernelDelayThread(1000);
+}
 
 static void out_finish(void) {
-    if (!g_abort && on > 0 && aport >= 0) {
-        memset(ob + on, 0, (GRAIN - on) * sizeof(short));
-        sceAudioOutOutput(aport, ob);
-    }
-    on = 0;
+    __sync_synchronize();
+    if (g_abort) g_flush = 1; else g_done = 1;
 }
 
 static int emit(const short *p, int n, int rate) {
-    if (n <= 0 || aport < 0) return g_abort;
+    if (n <= 0) return g_abort;
     double step = (double)rate / 48000.0;
+    unsigned h = rhead;
     while (rt < n) {
-        if (g_abort) return 1;
+        if (g_abort) { __sync_synchronize(); rhead = h; return 1; }
+        if (h - rtail >= RING) {
+            __sync_synchronize(); rhead = h;
+            while (h - rtail >= RING && !g_abort) sceKernelDelayThread(1000);
+            continue;
+        }
         int i = (int)rt;
         double fr = rt - i;
         short a = i ? p[i - 1] : rprev;
         short b = p[i];
-        ob[on++] = (short)(a + (b - a) * fr);
-        if (on == GRAIN) { sceAudioOutOutput(aport, ob); on = 0; }
+        ring[h & (RING - 1)] = (short)(a + (b - a) * fr);
+        h++;
         rt += step;
     }
     rprev = p[n - 1];
     rt -= n;
+    __sync_synchronize();
+    rhead = h;
     return g_abort;
 }
 
@@ -130,7 +173,6 @@ static int es_cb(short *w, int n, espeak_EVENT *ev) {
 
 /* ---------------- рабочий поток ---------------- */
 static int worker(SceSize args, void *argp) {
-    aport = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, 48000, SCE_AUDIO_OUT_MODE_MONO);
 #ifdef HAVE_PICO
     pico_setup();
 #endif
@@ -280,6 +322,7 @@ static void speak(const char *t) {
         if (eng == 0) snprintf(vn, sizeof vn, "%d", ev[cur].arg); else strcpy(vn, "en-us");
     }
     g_abort = 1;
+    g_flush = 1;
     while (g_busy) sceKernelDelayThread(500);
     snprintf(rq_text, sizeof rq_text, "%s", t);
     snprintf(rq_voice, sizeof rq_voice, "%s", vn);
@@ -356,6 +399,11 @@ int main(void) {
 #endif
     hist_load();
 
+    aport = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, 48000, SCE_AUDIO_OUT_MODE_MONO);
+    SceUID ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0, NULL);
+    if (ath < 0) ath = sceKernelCreateThread("aud", audio_thread, 0x10000100, 0x10000, 0, 0, NULL);
+    sceKernelStartThread(ath, 0, NULL);
+
     SceUID th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0, NULL);
     sceKernelStartThread(th, 0, NULL);
 
@@ -388,7 +436,7 @@ int main(void) {
             if (pad.buttons & SCE_CTRL_SELECT) { pitch += d; if (pitch < 50) pitch = 50; if (pitch > 200) pitch = 200; }
             else { speed += d; if (speed < 50) speed = 50; if (speed > 250) speed = 250; }
         }
-        if (pr & SCE_CTRL_SQUARE) g_abort = 1;
+        if (pr & SCE_CTRL_SQUARE) { g_abort = 1; g_flush = 1; }
         if ((pr & SCE_CTRL_CIRCLE) && hn) speak(hist[sel]);
         if (pr & SCE_CTRL_CROSS) do_new = 1;
         if ((pr & SCE_CTRL_TRIANGLE) && hn) do_edit = 1;
@@ -409,7 +457,7 @@ int main(void) {
         vita2d_start_drawing();
         vita2d_clear_screen();
         T(20, 34, COL_ACC, 1.3f, "VitaTTS");
-        T(180, 34, COL_DIM, 0.9f, "%s", g_ready ? (g_busy ? "SPEAKING" : "ready") : "loading...");
+        T(180, 34, COL_DIM, 0.9f, "%s", g_ready ? ((g_busy || g_play) ? "SPEAKING" : "ready") : "loading...");
         T(20, 66, COL_TXT, 0.95f, "EN voice (L/R): %s", ev[cur].label);
         T(20, 92, COL_TXT, 0.95f, "Speed %d%%   Pitch %d%%   RU/JA auto-detect: %s", speed, pitch,
 #ifdef HAVE_ESPEAK
