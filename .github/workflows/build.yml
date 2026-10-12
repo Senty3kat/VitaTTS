@@ -92,6 +92,11 @@ jobs:
             cp "$(find picotts -name $f | head -1)" payload/
           done
 
+      # ---------- SAM ----------
+      - name: SAM (исходники)
+        continue-on-error: true
+        run: git clone --depth 1 https://github.com/s-macke/SAM
+
       - name: Иконка
         run: |
           python3 - <<'EOF'
@@ -119,28 +124,32 @@ jobs:
           export PATH=$VITASDK/bin:$PATH
           [ -f payload/en-US_ta.bin ] && P=1 || P=0
           [ -f payload/espeak-ng-data/phontab ] && E=1 || E=0
-          echo "pico data: $P, espeak data: $E"
+          [ -f SAM/src/sam.c ] && S=1 || S=0
+          echo "pico data: $P, espeak data: $E, sam: $S"
           PL=$(dirname "$(find picotts -name picoapi.h 2>/dev/null | head -1)")
           PL=$(realpath "$PL" 2>/dev/null || echo "$PL")
           OK=0; N=0
-          for c in "1 1 0" "1 1 1" "1 0 0" "0 1 0"; do
+          for c in "1 1 0 1" "1 1 0 0" "1 1 1 0" "1 0 0 0" "0 1 0 0"; do
             set -- $c
             [ "$1" = 1 ] && [ $P = 0 ] && continue
             [ "$2" = 1 ] && [ $E = 0 ] && continue
+            [ "$4" = 1 ] && [ $S = 0 ] && continue
             N=$((N+1))
-            echo "=== Пробую: pico=$1 espeak=$2 mbrowrap=$3 ==="
+            echo "=== Пробую: pico=$1 espeak=$2 mbrowrap=$3 sam=$4 ==="
             rm -rf build; mkdir build; cd build
             if { cmake .. -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
                  -DCMAKE_BUILD_TYPE=Release \
                  -DWITH_PICO=$([ $1 = 1 ] && echo ON || echo OFF) \
                  -DWITH_ESPEAK=$([ $2 = 1 ] && echo ON || echo OFF) \
                  -DWITH_MBROWRAP=$([ $3 = 1 ] && echo ON || echo OFF) \
+                 -DWITH_SAM=$([ $4 = 1 ] && echo ON || echo OFF) \
+                 -DSAM_DIR=$GITHUB_WORKSPACE/SAM \
                  -DPICO_LIB="$PL" \
                  -DESPEAK_DIR=$GITHUB_WORKSPACE/espeak-ng \
                  -DPAYLOAD=$GITHUB_WORKSPACE/payload \
                  -DICON=$GITHUB_WORKSPACE/icon0.png \
                && make -j4 ; } > $GITHUB_WORKSPACE/log_$N.txt 2>&1 ; then
-              cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2" ; break
+              cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2 sam=$4" ; break
             fi
             cd ..
             echo "$c" > $GITHUB_WORKSPACE/log_$N.name
