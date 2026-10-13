@@ -36,6 +36,8 @@ extern int TextToPhonemes(unsigned char *);
 int debug __attribute__((weak)) = 0;
 #endif
 
+static int dec(const unsigned char **p);
+
 int _newlib_heap_size_user = 100 * 1024 * 1024;
 
 #define GRAIN 512
@@ -372,53 +374,174 @@ static void pico_say(int v, const char *txt) {
 
 /* ---------------- SAM (Commodore 64) ---------------- */
 #ifdef HAVE_SAM
-static const struct { int sp, pi, mo, th; } samv[6] = {
-    {72, 64, 128, 128},     /* SAM */
-    {72, 64, 110, 160},     /* Elf */
-    {92, 60, 190, 190},     /* Little Robot */
-    {82, 72, 110, 105},     /* Stuffy Guy */
-    {82, 32, 145, 145},     /* Little Old Lady */
-    {100, 64, 150, 200}};   /* Extra-Terrestrial */
-
-static void sam_say(int preset, const char *txt, int es) {
-    static char in[300];
+/* SAM: классический C64-голос + русский «по правилам» (без словарей) */
+static void sam_run(char *in, int es) {
     static short pcm[240000];
-    if (preset < 0 || preset > 5) preset = 0;
-    int sp = samv[preset].sp * 100 / (es > 20 ? es : 20);
+    int sp = 72 * 100 / (es > 20 ? es : 20);
     if (sp < 20) sp = 20; if (sp > 255) sp = 255;
+    SAM_SetSpeed((unsigned char)sp);
+    SetPitch(64);
+    SetMouth(128);
+    SetThroat(128);
+    SetInput(in);
+    SAMMain();
+    unsigned char *b = (unsigned char *)GetBuffer();
+    int cnt = GetBufferLength() / 50;
+    if (!b || cnt <= 0 || cnt > 220000) return;
+    for (int i = 0; i < cnt; i++) {
+        int v = ((int)b[i] - 128) * 200;     /* постоянный уровень: без «качания» громкости между кусками */
+        pcm[i] = (short)(v > 30000 ? 30000 : (v < -30000 ? -30000 : v));
+    }
+    emit(pcm, cnt, 22050);
+}
+
+static void sam_say(const char *txt, int es) {
+    static char in[256];
+    /* reciter разворачивает текст в фонемы в том же 256-байтовом буфере и переполняет его на длинных кусках,
+       поэтому режем на короткие куски */
+    const int CH = 70;
     int len = strlen(txt), pos = 0;
     while (pos < len && !g_abort) {
-        int e = pos + 200;
+        int e = pos + CH;
         if (e >= len) e = len;
-        else { int k = e; while (k > pos + 100 && txt[k] != ' ') k--; if (txt[k] == ' ') e = k; }
-        int n = 0;
-        for (int i = pos; i < e && n < 250; i++) {
+        else { int k = e; while (k > pos + 20 && txt[k] != ' ') k--; if (txt[k] == ' ') e = k; }
+        int n = 0, lastsp = 1;
+        for (int i = pos; i < e && n < CH + 4; i++) {
             unsigned char c = (unsigned char)txt[i];
             if (c >= 128) continue;
             c = (unsigned char)toupper(c);
-            in[n++] = (isalnum(c) || strchr(" .,?!-':;", c)) ? (char)c : ' ';
+            char o;
+            if ((c >= 'A' && c <= 'Z') || c == '.' || c == ',' || c == '?' || c == '!' || c == '-') o = (char)c;
+            else if (c >= '0' && c <= '9') o = (char)c;
+            else o = ' ';
+            if (o == ' ' && lastsp) continue;
+            lastsp = (o == ' ');
+            in[n++] = o;
         }
         pos = e;
+        while (n > 0 && in[n - 1] == ' ') n--;
         if (n == 0) continue;
         in[n++] = '[';
         in[n] = 0;
         if (!TextToPhonemes((unsigned char *)in)) continue;
-        SAM_SetSpeed((unsigned char)sp);
-        SetPitch((unsigned char)samv[preset].pi);
-        SetMouth((unsigned char)samv[preset].mo);
-        SetThroat((unsigned char)samv[preset].th);
-        SetInput(in);
-        SAMMain();
-        unsigned char *b = (unsigned char *)GetBuffer();
-        int cnt = GetBufferLength() / 50;
-        if (!b || cnt <= 0) continue;
-        if (cnt > 240000) cnt = 240000;
-        int peak = 1;
-        for (int i = 0; i < cnt; i++) { int v = abs((int)b[i] - 128); if (v > peak) peak = v; }
-        float k = 24000.0f / peak;
-        for (int i = 0; i < cnt; i++) pcm[i] = (short)(((int)b[i] - 128) * k);
-        emit(pcm, cnt, 22050);
+        sam_run(in, es);
     }
+}
+
+/* ---- русский -> фонемы SAM ----
+   Правила: оглушение/озвончение, смягчение (ь, я е ё ю и), шипящие всегда твёрдые, ц = Т+С.
+   Ударение словарём НЕ определяется (без него звук монотонный, «роботный»):
+   чтобы выделить гласную, напиши её ЗАГЛАВНОЙ (приВет), ё всегда ударная. */
+typedef struct { int cp; const char *v, *u; int vo, trig; } RuOb;
+static const RuOb ruob[] = {
+    {0x431, "B", "P", 1, 1}, {0x432, "V", "F", 1, 0}, {0x433, "G", "K", 1, 1}, {0x434, "D", "T", 1, 1},
+    {0x436, "ZH", "SH", 1, 1}, {0x437, "Z", "S", 1, 1},
+    {0x43A, "G", "K", 0, 1}, {0x43F, "B", "P", 0, 1}, {0x442, "D", "T", 0, 1}, {0x444, "V", "F", 0, 1},
+    {0x441, "Z", "S", 0, 1}, {0x448, "ZH", "SH", 0, 1}, {0x445, "/H", "/H", 0, 1},
+    {0x446, "TS", "TS", 0, 1}, {0x447, "CH", "CH", 0, 1}, {0x449, "SHSH", "SHSH", 0, 1},
+    {0, 0, 0, 0, 0}};
+
+typedef struct { const char *fix; const RuOb *ob; int voiced, hard, stress; char vowel; } RuTok;
+
+static const RuOb *ru_findob(int cp) { for (const RuOb *o = ruob; o->cp; o++) if (o->cp == cp) return o; return 0; }
+static int ru_lower(int c) { if (c >= 0x410 && c <= 0x42F) return c + 0x20; if (c == 0x401) return 0x451; return c; }
+static int ru_isletter(int c) { c = ru_lower(c); return (c >= 0x430 && c <= 0x44F) || c == 0x451; }
+static int ru_isupper(int c) { return (c >= 0x410 && c <= 0x42F) || c == 0x401; }
+
+/* одно слово (кодпоинты) -> строка фонем */
+static void ru_word(const int *cp, int n, char *out, int outsz) {
+    RuTok t[96]; int nt = 0;
+    int nlow = 0; for (int i = 0; i < n; i++) if (ru_isletter(cp[i]) && !ru_isupper(cp[i])) nlow++;
+    int allcaps = (nlow == 0 && n > 1);
+    for (int i = 0; i < n && nt < 90; i++) {
+        int c0 = cp[i];
+        if (c0 == 0x301) { if (nt && t[nt - 1].vowel) t[nt - 1].stress = 1; continue; }   /* знак ударения после гласной */
+        int c = ru_lower(c0);
+        int up = ru_isupper(c0) && !allcaps;
+        const char *vf = 0; int iot = 0, isi = 0;
+        switch (c) {
+            case 0x430: vf = "AA"; break;                 /* а */
+            case 0x43E: vf = "AO"; break;                 /* о */
+            case 0x443: vf = "UX"; break;                 /* у */
+            case 0x44D: vf = "EH"; break;                 /* э */
+            case 0x44B: vf = "IX"; break;                 /* ы */
+            case 0x438: vf = "IY"; isi = 1; break;        /* и */
+            case 0x44F: vf = "AA"; iot = 1; break;        /* я */
+            case 0x44E: vf = "UX"; iot = 1; break;        /* ю */
+            case 0x435: vf = "EH"; iot = 1; break;        /* е */
+            case 0x451: vf = "AO"; iot = 1; up = 1; break;/* ё */
+        }
+        if (vf) {
+            RuTok *p = nt ? &t[nt - 1] : 0;
+            int prevhard = p && p->ob && p->hard;          /* ж ш ц */
+            int prevcons = p && (p->ob || (p->fix && !p->vowel && strcmp(p->fix, "Y") != 0));
+            if (iot && !(prevhard && c != 0x44E && c != 0x44F ? 0 : 0)) {
+                /* смягчение/йотация: после согласной (кроме ж ш ц) и после гласной/начала добавляем Y */
+                if (!prevhard) { t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++; }
+            }
+            if (isi && prevhard) vf = "IX";                /* жи ши цы читаются как «ы» */
+            (void)prevcons;
+            t[nt].fix = vf; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 1; t[nt].stress = up; nt++;
+            continue;
+        }
+        if (c == 0x44C) {                                  /* ь */
+            if (nt && !t[nt - 1].vowel && !(t[nt - 1].ob && (t[nt - 1].ob->cp == 0x436 || t[nt - 1].ob->cp == 0x448 || t[nt - 1].ob->cp == 0x447 || t[nt - 1].ob->cp == 0x449))) {
+                t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++;
+            }
+            continue;
+        }
+        if (c == 0x44A) continue;                          /* ъ */
+        const char *fx = 0;
+        switch (c) { case 0x43B: fx = "L"; break; case 0x43C: fx = "M"; break; case 0x43D: fx = "N"; break;
+                     case 0x440: fx = "R"; break; case 0x439: fx = "Y"; break; }
+        if (fx) { t[nt].fix = fx; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++; continue; }
+        const RuOb *o = ru_findob(c);
+        if (o) {
+            t[nt].fix = 0; t[nt].ob = o; t[nt].voiced = o->vo;
+            t[nt].hard = (c == 0x436 || c == 0x448 || c == 0x446);
+            t[nt].vowel = 0; t[nt].stress = 0; nt++;
+        }
+    }
+    /* оглушение / озвончение справа налево */
+    for (int i = nt - 1; i >= 0; i--) {
+        if (!t[i].ob) continue;
+        if (i == nt - 1) { t[i].voiced = 0; continue; }
+        const RuTok *nx = &t[i + 1];
+        if (nx->ob && nx->ob->trig) t[i].voiced = nx->voiced;
+    }
+    int o = 0;
+    for (int i = 0; i < nt; i++) {
+        const char *s = t[i].ob ? (t[i].voiced ? t[i].ob->v : t[i].ob->u) : t[i].fix;
+        int l = strlen(s);
+        if (o + l + 2 >= outsz) break;
+        memcpy(out + o, s, l); o += l;
+        if (t[i].vowel && t[i].stress) out[o++] = '5';
+    }
+    out[o] = 0;
+}
+
+static void sam_say_ru(const char *txt, int es) {
+    static char in[256], w[96];
+    static int cp[96];
+    const unsigned char *p = (const unsigned char *)txt;
+    int n = 0, nin = 0;
+    while (*p && !g_abort) {
+        int c = dec(&p);
+        int letter = ru_isletter(c) || c == 0x301;
+        if (letter) { if (n < 90) cp[n++] = c; }
+        if (!letter || !*p) {
+            if (n) {
+                ru_word(cp, n, w, sizeof w);
+                int wl = strlen(w);
+                if (nin + wl + 2 > 225) { in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); nin = 0; }
+                memcpy(in + nin, w, wl); nin += wl;
+                in[nin++] = ' ';
+                n = 0;
+            }
+            if (!letter && nin < 225 && (c == ',' || c == '.' || c == '?' || c == '!' || c == '-')) in[nin++] = (char)c;
+        }
+    }
+    if (nin > 0 && !g_abort) { in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); }
 }
 #endif
 
@@ -465,9 +588,9 @@ static int worker(SceSize args, void *argp) {
                 pico_say(v, buf);
             }
 #endif
-        } else if (rq_eng == 3) {
+        } else if (rq_eng == 3 || rq_eng == 4) {
 #ifdef HAVE_SAM
-            sam_say(atoi(rq_voice), t, es);
+            if (rq_eng == 4) sam_say_ru(t, es); else sam_say(t, es);
 #endif
         } else {
 #ifdef HAVE_ESPEAK
@@ -605,6 +728,10 @@ static void speak_ex(const char *t, int cap) {
     if (!g_ready || !t[0]) return;
     int lang = detect(t), eng;
     char vn[40];
+#ifdef HAVE_SAM
+    if (lang == 1 && ev[cur].eng == 3) { eng = 4; snprintf(vn, sizeof vn, "0"); }   /* голос SAM + русский текст = робо-русский */
+    else
+#endif
     if (lang == 1) { eng = 1; snprintf(vn, sizeof vn, "ru%s", stylev[style]); }
     else if (lang == 2) { eng = 1; snprintf(vn, sizeof vn, "ja%s", stylev[style]); }
     else {
@@ -710,11 +837,6 @@ int main(void) {
 #endif
 #ifdef HAVE_SAM
     ev[nev++] = (Voice){"SAM C64", 3, 0};
-    ev[nev++] = (Voice){"SAM Elf", 3, 1};
-    ev[nev++] = (Voice){"SAM Little Robot", 3, 2};
-    ev[nev++] = (Voice){"SAM Stuffy Guy", 3, 3};
-    ev[nev++] = (Voice){"SAM Old Lady", 3, 4};
-    ev[nev++] = (Voice){"SAM Alien", 3, 5};
 #endif
     hist_load();
 
