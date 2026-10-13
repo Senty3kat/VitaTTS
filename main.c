@@ -33,7 +33,7 @@ extern int SAMMain(void);
 extern char *GetBuffer(void);
 extern int GetBufferLength(void);
 extern int TextToPhonemes(unsigned char *);
-int debug = 0;
+int debug __attribute__((weak)) = 0;
 #endif
 
 int _newlib_heap_size_user = 100 * 1024 * 1024;
@@ -559,8 +559,8 @@ typedef struct { const char *label; int eng; int arg; } Voice;
 static Voice ev[12];
 static int nev, cur;
 static int speed = 100, pitch = 100, volume = 100, style;
-static const char *stylev[] = {"", "+m3", "+m6", "+f2", "+f4", "+klatt3", "+klatt4"};
-#define NSTYLE 7
+static const char *stylev[] = {"", "+m3", "+m6", "+f2", "+f4", "+croak"};
+#define NSTYLE 6
 static char hist[HN][HL];
 static int hn, sel;
 
