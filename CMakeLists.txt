@@ -36,6 +36,7 @@ if(WITH_SAM)
   list(FILTER SAM_SRC EXCLUDE REGEX "/main\\.c$")
   add_library(ttssam STATIC ${SAM_SRC})
   target_include_directories(ttssam PRIVATE "${SAM_DIR}/src")
+  target_compile_options(ttssam PRIVATE -fpermissive -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types)
   list(APPEND LIBS ttssam)
 endif()
 
