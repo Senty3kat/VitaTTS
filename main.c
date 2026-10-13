@@ -25,7 +25,7 @@
 #ifdef HAVE_SAM
 /* SAM (Software Automatic Mouth, C64): прототипы объявляем сами, чтобы не тащить sam.h с его глобалами */
 extern void SetInput(char *);
-extern void SetSpeed(unsigned char);
+extern void SAM_SetSpeed(unsigned char);   /* в SAM переименована при сборке: у eSpeak тоже есть SetSpeed */
 extern void SetPitch(unsigned char);
 extern void SetMouth(unsigned char);
 extern void SetThroat(unsigned char);
@@ -403,7 +403,7 @@ static void sam_say(int preset, const char *txt, int es) {
         in[n++] = '[';
         in[n] = 0;
         if (!TextToPhonemes((unsigned char *)in)) continue;
-        SetSpeed((unsigned char)sp);
+        SAM_SetSpeed((unsigned char)sp);
         SetPitch((unsigned char)samv[preset].pi);
         SetMouth((unsigned char)samv[preset].mo);
         SetThroat((unsigned char)samv[preset].th);
