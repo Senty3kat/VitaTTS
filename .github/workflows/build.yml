@@ -153,6 +153,7 @@ jobs:
             fi
             cd ..
             echo "$c" > $GITHUB_WORKSPACE/log_$N.name
+            echo "--- ошибки варианта [$c]:"; grep -iE "error|undefined|fatal" $GITHUB_WORKSPACE/log_$N.txt | head -8
           done
           if [ $OK = 0 ]; then
             for f in log_*.txt; do
