@@ -1,0 +1,50 @@
+name: RHVoice probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Разведка RHVoice
+        continue-on-error: true
+        run: |
+          {
+          echo "##### RHVoice repo"
+          git clone --depth 1 https://github.com/RHVoice/RHVoice rh 2>&1 | tail -2
+          cd rh
+          git log -1 --format='%H %cd'
+          echo "##### tags (последние)"; git ls-remote --tags https://github.com/RHVoice/RHVoice | tail -5
+          echo "##### верхний уровень"; ls
+          echo "##### src"; ls src; echo "--- src/core"; ls src/core | head -150
+          echo "--- src/include/core"; ls src/include/core | head -100
+          echo "--- src/lib"; ls src/lib
+          echo "--- src/third-party"; ls src/third-party
+          echo "##### количество cpp в core"; ls src/core/*.cpp | wc -l
+          echo "##### потоки/зависимости в core"
+          grep -rlE "std::thread|pthread|boost::thread|std::mutex|std::async" src/core src/include/core src/lib | head -20
+          grep -rhoE "#include <boost/[a-z_/]+" src/core src/include/core src/lib | sort | uniq -c | sort -rn | head -40
+          echo "##### src/core/SConscript"; cat src/core/SConscript
+          echo "##### src/lib/SConscript"; cat src/lib/SConscript 2>/dev/null
+          echo "##### data/SConscript"; cat data/SConscript
+          echo "##### SConstruct (начало 17000 байт)"; head -c 17000 SConstruct
+          echo "##### lib.cpp (начало)"; head -n 200 src/lib/lib.cpp
+          echo "##### RHVoice.h"; cat src/include/RHVoice.h | head -n 250
+          echo "##### data/languages"; ls data/languages 2>/dev/null; echo "--- data/voices"; ls data/voices 2>/dev/null
+          } > ../probe.txt 2>&1
+          cd ..
+          {
+          echo "##### языки и голоса: размеры"
+          for r in Russian English aleksandr-hq-rus victoria-rus tatiana-rus mikhail-rus vitaliy-rus yuriy-rus evgeniy-rus; do
+            rm -rf "x_$r"
+            if git clone --depth 1 "https://github.com/RHVoice/$r" "x_$r" >/dev/null 2>&1; then
+              echo "== $r: $(du -sh x_$r | cut -f1)"; ls "x_$r" | head -30
+            else echo "== $r: нет репозитория"; fi
+          done
+          } >> probe.txt 2>&1
+          wc -c probe.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rhvoice-probe
+          path: probe.txt
