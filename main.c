@@ -475,9 +475,9 @@ static void ru_word(const int *cp, int n, char *out, int outsz) {
             RuTok *p = nt ? &t[nt - 1] : 0;
             int prevhard = p && p->ob && p->hard;          /* ж ш ц */
             int prevcons = p && (p->ob || (p->fix && !p->vowel && strcmp(p->fix, "Y") != 0));
-            if (iot && !(prevhard && c != 0x44E && c != 0x44F ? 0 : 0)) {
-                /* смягчение/йотация: после согласной (кроме ж ш ц) и после гласной/начала добавляем Y */
-                if (!prevhard) { t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++; }
+            int prevy = p && p->fix && !strcmp(p->fix, "Y");   /* после ь уже есть смягчение */
+            if (iot && !prevhard && !prevy) {   /* смягчение/йотация: Y после согласной (кроме ж ш ц), после гласной и в начале */
+                t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++;
             }
             if (isi && prevhard) vf = "IX";                /* жи ши цы читаются как «ы» */
             (void)prevcons;
@@ -533,12 +533,12 @@ static void sam_say_ru(const char *txt, int es) {
             if (n) {
                 ru_word(cp, n, w, sizeof w);
                 int wl = strlen(w);
-                if (nin + wl + 2 > 225) { in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); nin = 0; }
+                if (nin + wl + 2 > 110) {   /* ~5-6 с звука на кусок: у SAM буфер всего ~10 с */ in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); nin = 0; }
                 memcpy(in + nin, w, wl); nin += wl;
                 in[nin++] = ' ';
                 n = 0;
             }
-            if (!letter && nin < 225 && (c == ',' || c == '.' || c == '?' || c == '!' || c == '-')) in[nin++] = (char)c;
+            if (!letter && nin < 108 && (c == ',' || c == '.' || c == '?' || c == '!' || c == '-')) in[nin++] = (char)c;
         }
     }
     if (nin > 0 && !g_abort) { in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); }
