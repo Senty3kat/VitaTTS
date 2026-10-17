@@ -108,6 +108,78 @@ jobs:
             cp "$(find picotts -name $f | head -1)" payload/
           done
 
+      # ---------- RHVoice (русский): исходники, Boost, данные ----------
+      # версии закреплены (проверены на хосте): RHVoice, язык Russian, голоса Aleksandr-hq и Anna.
+      # RH_RATE: 24000 (лучше звук) или 16000 (быстрее синтез, если на Vita не успевает в реальном времени)
+      - name: Restore RHVoice cache
+        id: crh
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            rhvoice
+            payload/rh
+          key: rhvoice-7725bb9-r24000-v1
+
+      - name: RHVoice (исходники + Boost + данные)
+        id: rinst
+        if: steps.crh.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          set -e
+          mkdir -p payload
+          rm -rf rhvoice payload/rh
+          RH_RATE=24000
+          getrepo() {  # url sha dest: клон ровно нужного коммита без истории
+            mkdir -p "$3"; git -C "$3" init -q; git -C "$3" remote add origin "$1"
+            git -C "$3" fetch -q --depth 1 origin "$2"; git -C "$3" checkout -q FETCH_HEAD
+          }
+          getrepo https://github.com/RHVoice/RHVoice 7725bb9cb15e09492c5d448d9b20c57ddf706644 rhvoice
+          git -C rhvoice submodule update --init --depth 1 --jobs 4 -- external/libs/boost/libs
+          mkdir -p rhvoice/boost_inc/boost
+          for d in rhvoice/external/libs/boost/libs/*/include/boost; do cp -r "$d"/. rhvoice/boost_inc/boost/; done
+          # config.h вместо сгенерированного CMake
+          printf '#pragma once\nconst char CONFIG_PATH[] = "ux0:data";\nconst char DATA_PATH[] = "app0:rh";\n' > rhvoice/src/core/config.h
+          # заглушка пакетного клиента (Boost.Json + file_lock на Vita не нужны)
+          cat > rhvoice/src/include/core/package_client.hpp <<'EOF'
+          #ifndef RHVOICE_PACKAGE_CLIENT_HPP
+          #define RHVOICE_PACKAGE_CLIENT_HPP
+          #include <memory>
+          #include <string>
+          namespace RHVoice { namespace pkg {
+            class package_client {
+            public:
+              using ptr = std::shared_ptr<package_client>;
+              static ptr get(const std::string&) { return ptr(); }
+            };
+          } }
+          #endif
+          EOF
+          rm -rf rhvoice/external rhvoice/data rhvoice/.git
+          # данные: язык и два голоса, только нужная частота (меньше файлов и размер VPK)
+          D=payload/rh
+          getrepo https://github.com/RHVoice/Russian 3483d43d9365a668789712f0842ae726d9a2c0c5 $D/languages/Russian
+          getrepo https://github.com/rhvoice/aleksandr-hq-rus 3259373e32d03fdd26d515c6d2a9da3d2d01f8c2 $D/voices/Aleksandr-hq
+          getrepo https://github.com/RHVoice/anna-rus b8b0d901f9dca64413c83a37f2257b726e543c84 $D/voices/Anna
+          find $D -name .git -prune -exec rm -rf {} +
+          for v in Aleksandr-hq Anna; do
+            for r in 16000 24000; do [ $r != $RH_RATE ] && rm -rf $D/voices/$v/$r; done
+            rm -f $D/voices/$v/*.md $D/voices/$v/Readme-*.txt
+          done
+          find payload/rh -name '* *' -print -delete
+          echo "файлов RHVoice в payload:"; find payload/rh -type f | wc -l; du -sh payload/rh rhvoice/boost_inc
+          test -f payload/rh/languages/Russian/dict.fst
+          test -f rhvoice/src/lib/lib.cpp
+          echo "ok=1" >> $GITHUB_OUTPUT
+
+      - name: Save RHVoice cache
+        if: steps.rinst.outputs.ok == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            rhvoice
+            payload/rh
+          key: rhvoice-7725bb9-r24000-v1
+
       # ---------- SAM ----------
       - name: SAM (исходники)
         continue-on-error: true
@@ -141,17 +213,28 @@ jobs:
           [ -f payload/en-US_ta.bin ] && P=1 || P=0
           [ -f payload/espeak-ng-data/phontab ] && E=1 || E=0
           [ -f SAM/src/sam.c ] && S=1 || S=0
-          echo "pico data: $P, espeak data: $E, sam: $S"
+          [ -f rhvoice/src/lib/lib.cpp ] && [ -f payload/rh/languages/Russian/dict.fst ] && R=1 || R=0
+          echo "pico data: $P, espeak data: $E, sam: $S, rhvoice: $R"
+          # ошибки сборки пишем в аннотации запуска: логи Actions из сессии Claude недоступны, а аннотации читаются через API
+          ann() {  # уровень заголовок файл
+            local m
+            m=$(
+              { grep -iE "error|undefined|fatal|ld returned|unresolved|cannot|not declared" "$3" | head -25 | cut -c1-300
+                echo "--- конец лога:"; tail -n 8 "$3" | cut -c1-300; } | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::$1 title=$2::$m"
+          }
           PL=$(dirname "$(find picotts -name picoapi.h 2>/dev/null | head -1)")
           PL=$(realpath "$PL" 2>/dev/null || echo "$PL")
           OK=0; N=0
-          for c in "1 1 0 1" "1 1 0 0" "1 1 1 0" "1 0 0 0" "0 1 0 0"; do
+          # вариант: pico espeak mbrowrap sam rhvoice
+          for c in "1 1 0 1 1" "1 1 0 0 1" "1 1 0 1 0" "1 1 0 0 0" "1 1 1 0 0" "1 0 0 0 0" "0 1 0 0 0"; do
             set -- $c
             [ "$1" = 1 ] && [ $P = 0 ] && continue
             [ "$2" = 1 ] && [ $E = 0 ] && continue
             [ "$4" = 1 ] && [ $S = 0 ] && continue
+            [ "$5" = 1 ] && [ $R = 0 ] && continue
             N=$((N+1))
-            echo "=== Пробую: pico=$1 espeak=$2 mbrowrap=$3 sam=$4 ==="
+            echo "=== Пробую: pico=$1 espeak=$2 mbrowrap=$3 sam=$4 rhvoice=$5 ==="
             rm -rf build; mkdir build; cd build
             if { cmake .. -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
                  -DCMAKE_BUILD_TYPE=Release \
@@ -159,17 +242,21 @@ jobs:
                  -DWITH_ESPEAK=$([ $2 = 1 ] && echo ON || echo OFF) \
                  -DWITH_MBROWRAP=$([ $3 = 1 ] && echo ON || echo OFF) \
                  -DWITH_SAM=$([ $4 = 1 ] && echo ON || echo OFF) \
+                 -DWITH_RHVOICE=$([ $5 = 1 ] && echo ON || echo OFF) \
+                 -DRH_DIR=$GITHUB_WORKSPACE/rhvoice \
                  -DSAM_DIR=$GITHUB_WORKSPACE/SAM \
                  -DPICO_LIB="$PL" \
                  -DESPEAK_DIR=$GITHUB_WORKSPACE/espeak-ng \
                  -DPAYLOAD=$GITHUB_WORKSPACE/payload \
                  -DICON=$GITHUB_WORKSPACE/icon0.png \
                && make -j4 ; } > $GITHUB_WORKSPACE/log_$N.txt 2>&1 ; then
-              cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2 sam=$4" ; break
+              cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2 sam=$4 rhvoice=$5"
+              echo "::notice title=Собрано::pico=$1 espeak=$2 sam=$4 rhvoice=$5 (вариант $N)"; break
             fi
             cd ..
             echo "$c" > $GITHUB_WORKSPACE/log_$N.name
             echo "--- ошибки варианта [$c]:"; grep -iE "error|undefined|fatal" $GITHUB_WORKSPACE/log_$N.txt | head -8
+            ann warning "Вариант [$c] не собрался" $GITHUB_WORKSPACE/log_$N.txt
           done
           if [ $OK = 0 ]; then
             for f in log_*.txt; do

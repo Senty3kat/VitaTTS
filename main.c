@@ -1,4 +1,4 @@
-// VitaTTS v2 - быстрый TTS для PS Vita (Pico/SVOX для английского, eSpeak-NG для RU/JA/EN-retro)
+// VitaTTS v2.1 - быстрый TTS для PS Vita (Pico/SVOX и SAM C64 для английского, RHVoice для русского, eSpeak-NG для RU/JA/EN-retro)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +22,9 @@
 #ifdef HAVE_ESPEAK
 #include <espeak-ng/speak_lib.h>
 #endif
+#ifdef HAVE_RHVOICE
+#include "RHVoice.h"
+#endif
 #ifdef HAVE_SAM
 /* SAM (Software Automatic Mouth, C64): прототипы объявляем сами, чтобы не тащить sam.h с его глобалами */
 extern void SetInput(char *);
@@ -38,7 +41,7 @@ int debug __attribute__((weak)) = 0;
 
 static int dec(const unsigned char **p);
 
-int _newlib_heap_size_user = 100 * 1024 * 1024;
+int _newlib_heap_size_user = 150 * 1024 * 1024;   /* Pico 2x20 МБ + RHVoice ~40 МБ + буферы */
 
 #define GRAIN 512
 #define HN 5
@@ -428,121 +431,6 @@ static void sam_say(const char *txt, int es) {
     }
 }
 
-/* ---- русский -> фонемы SAM ----
-   Правила: оглушение/озвончение, смягчение (ь, я е ё ю и), шипящие всегда твёрдые, ц = Т+С.
-   Ударение словарём НЕ определяется (без него звук монотонный, «роботный»):
-   чтобы выделить гласную, напиши её ЗАГЛАВНОЙ (приВет), ё всегда ударная. */
-typedef struct { int cp; const char *v, *u; int vo, trig; } RuOb;
-static const RuOb ruob[] = {
-    {0x431, "B", "P", 1, 1}, {0x432, "V", "F", 1, 0}, {0x433, "G", "K", 1, 1}, {0x434, "D", "T", 1, 1},
-    {0x436, "ZH", "SH", 1, 1}, {0x437, "Z", "S", 1, 1},
-    {0x43A, "G", "K", 0, 1}, {0x43F, "B", "P", 0, 1}, {0x442, "D", "T", 0, 1}, {0x444, "V", "F", 0, 1},
-    {0x441, "Z", "S", 0, 1}, {0x448, "ZH", "SH", 0, 1}, {0x445, "/H", "/H", 0, 1},
-    {0x446, "TS", "TS", 0, 1}, {0x447, "CH", "CH", 0, 1}, {0x449, "SHSH", "SHSH", 0, 1},
-    {0, 0, 0, 0, 0}};
-
-typedef struct { const char *fix; const RuOb *ob; int voiced, hard, stress; char vowel; } RuTok;
-
-static const RuOb *ru_findob(int cp) { for (const RuOb *o = ruob; o->cp; o++) if (o->cp == cp) return o; return 0; }
-static int ru_lower(int c) { if (c >= 0x410 && c <= 0x42F) return c + 0x20; if (c == 0x401) return 0x451; return c; }
-static int ru_isletter(int c) { c = ru_lower(c); return (c >= 0x430 && c <= 0x44F) || c == 0x451; }
-static int ru_isupper(int c) { return (c >= 0x410 && c <= 0x42F) || c == 0x401; }
-
-/* одно слово (кодпоинты) -> строка фонем */
-static void ru_word(const int *cp, int n, char *out, int outsz) {
-    RuTok t[96]; int nt = 0;
-    int nlow = 0; for (int i = 0; i < n; i++) if (ru_isletter(cp[i]) && !ru_isupper(cp[i])) nlow++;
-    int allcaps = (nlow == 0 && n > 1);
-    for (int i = 0; i < n && nt < 90; i++) {
-        int c0 = cp[i];
-        if (c0 == 0x301) { if (nt && t[nt - 1].vowel) t[nt - 1].stress = 1; continue; }   /* знак ударения после гласной */
-        int c = ru_lower(c0);
-        int up = ru_isupper(c0) && !allcaps;
-        const char *vf = 0; int iot = 0, isi = 0;
-        switch (c) {
-            case 0x430: vf = "AA"; break;                 /* а */
-            case 0x43E: vf = "AO"; break;                 /* о */
-            case 0x443: vf = "UX"; break;                 /* у */
-            case 0x44D: vf = "EH"; break;                 /* э */
-            case 0x44B: vf = "IX"; break;                 /* ы */
-            case 0x438: vf = "IY"; isi = 1; break;        /* и */
-            case 0x44F: vf = "AA"; iot = 1; break;        /* я */
-            case 0x44E: vf = "UX"; iot = 1; break;        /* ю */
-            case 0x435: vf = "EH"; iot = 1; break;        /* е */
-            case 0x451: vf = "AO"; iot = 1; up = 1; break;/* ё */
-        }
-        if (vf) {
-            RuTok *p = nt ? &t[nt - 1] : 0;
-            int prevhard = p && p->ob && p->hard;          /* ж ш ц */
-            int prevcons = p && (p->ob || (p->fix && !p->vowel && strcmp(p->fix, "Y") != 0));
-            int prevy = p && p->fix && !strcmp(p->fix, "Y");   /* после ь уже есть смягчение */
-            if (iot && !prevhard && !prevy) {   /* смягчение/йотация: Y после согласной (кроме ж ш ц), после гласной и в начале */
-                t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++;
-            }
-            if (isi && prevhard) vf = "IX";                /* жи ши цы читаются как «ы» */
-            (void)prevcons;
-            t[nt].fix = vf; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 1; t[nt].stress = up; nt++;
-            continue;
-        }
-        if (c == 0x44C) {                                  /* ь */
-            if (nt && !t[nt - 1].vowel && !(t[nt - 1].ob && (t[nt - 1].ob->cp == 0x436 || t[nt - 1].ob->cp == 0x448 || t[nt - 1].ob->cp == 0x447 || t[nt - 1].ob->cp == 0x449))) {
-                t[nt].fix = "Y"; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++;
-            }
-            continue;
-        }
-        if (c == 0x44A) continue;                          /* ъ */
-        const char *fx = 0;
-        switch (c) { case 0x43B: fx = "L"; break; case 0x43C: fx = "M"; break; case 0x43D: fx = "N"; break;
-                     case 0x440: fx = "R"; break; case 0x439: fx = "Y"; break; }
-        if (fx) { t[nt].fix = fx; t[nt].ob = 0; t[nt].hard = 0; t[nt].vowel = 0; t[nt].stress = 0; nt++; continue; }
-        const RuOb *o = ru_findob(c);
-        if (o) {
-            t[nt].fix = 0; t[nt].ob = o; t[nt].voiced = o->vo;
-            t[nt].hard = (c == 0x436 || c == 0x448 || c == 0x446);
-            t[nt].vowel = 0; t[nt].stress = 0; nt++;
-        }
-    }
-    /* оглушение / озвончение справа налево */
-    for (int i = nt - 1; i >= 0; i--) {
-        if (!t[i].ob) continue;
-        if (i == nt - 1) { t[i].voiced = 0; continue; }
-        const RuTok *nx = &t[i + 1];
-        if (nx->ob && nx->ob->trig) t[i].voiced = nx->voiced;
-    }
-    int o = 0;
-    for (int i = 0; i < nt; i++) {
-        const char *s = t[i].ob ? (t[i].voiced ? t[i].ob->v : t[i].ob->u) : t[i].fix;
-        int l = strlen(s);
-        if (o + l + 2 >= outsz) break;
-        memcpy(out + o, s, l); o += l;
-        if (t[i].vowel && t[i].stress) out[o++] = '5';
-    }
-    out[o] = 0;
-}
-
-static void sam_say_ru(const char *txt, int es) {
-    static char in[256], w[96];
-    static int cp[96];
-    const unsigned char *p = (const unsigned char *)txt;
-    int n = 0, nin = 0;
-    while (*p && !g_abort) {
-        int c = dec(&p);
-        int letter = ru_isletter(c) || c == 0x301;
-        if (letter) { if (n < 90) cp[n++] = c; }
-        if (!letter || !*p) {
-            if (n) {
-                ru_word(cp, n, w, sizeof w);
-                int wl = strlen(w);
-                if (nin + wl + 2 > 110) {   /* ~5-6 с звука на кусок: у SAM буфер всего ~10 с */ in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); nin = 0; }
-                memcpy(in + nin, w, wl); nin += wl;
-                in[nin++] = ' ';
-                n = 0;
-            }
-            if (!letter && nin < 108 && (c == ',' || c == '.' || c == '?' || c == '!' || c == '-')) in[nin++] = (char)c;
-        }
-    }
-    if (nin > 0 && !g_abort) { in[nin++] = (char)0x9b; in[nin] = 0; sam_run(in, es); }
-}
 #endif
 
 /* ---------------- eSpeak-NG ---------------- */
@@ -555,6 +443,44 @@ static int es_cb(short *w, int n, espeak_EVENT *ev) {
 }
 #endif
 
+/* ---------------- RHVoice (русский): HTS-синтез, данные в app0:rh ---------------- */
+#ifdef HAVE_RHVOICE
+static RHVoice_tts_engine rh_eng;
+static int rh_ok, rh_nv, rh_sr = 24000;
+static int rh_set_sr(int sr, void *u) { rh_sr = sr; return 1; }
+/* возвращаем 0, чтобы остановить синтез при новой фразе/стопе */
+static int rh_play(const short *smp, unsigned n, void *u) { return emit(smp, (int)n, rh_sr) ? 0 : 1; }
+
+static void rh_init(void) {
+    static const char *rp[] = {NULL};
+    RHVoice_init_params ip;
+    memset(&ip, 0, sizeof ip);
+    ip.data_path = "app0:rh";
+    ip.config_path = "ux0:data";
+    ip.resource_paths = rp;
+    ip.callbacks.set_sample_rate = rh_set_sr;
+    ip.callbacks.play_speech = rh_play;
+    ip.options = RHVoice_preload_voices;
+    rh_eng = RHVoice_new_tts_engine(&ip);
+    if (rh_eng) { rh_nv = (int)RHVoice_get_number_of_voices(rh_eng); rh_ok = rh_nv > 0; }
+}
+
+static void rh_say(const char *voice, const char *txt, int es) {
+    if (!rh_ok) return;
+    RHVoice_synth_params sp;
+    memset(&sp, 0, sizeof sp);
+    sp.voice_profile = voice;
+    double r = es / 100.0;
+    sp.relative_rate = r < 0.3 ? 0.3 : (r > 4.0 ? 4.0 : r);
+    sp.relative_pitch = 1.0;
+    sp.relative_volume = 1.0;
+    RHVoice_message m = RHVoice_new_message(rh_eng, txt, (unsigned)strlen(txt), RHVoice_message_text, &sp, NULL);
+    if (!m) return;
+    RHVoice_speak(m);
+    RHVoice_delete_message(m);
+}
+#endif
+
 /* ---------------- рабочий поток синтеза ---------------- */
 static int worker(SceSize args, void *argp) {
 #ifdef HAVE_PICO
@@ -563,6 +489,9 @@ static int worker(SceSize args, void *argp) {
 #ifdef HAVE_ESPEAK
     es_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, "app0:", espeakINITIALIZE_DONT_EXIT);
     if (es_rate > 0) { espeak_SetSynthCallback(es_cb); es_ok = 1; }
+#endif
+#ifdef HAVE_RHVOICE
+    rh_init();
 #endif
     g_ready = 1;
     char last[40] = "";
@@ -588,9 +517,13 @@ static int worker(SceSize args, void *argp) {
                 pico_say(v, buf);
             }
 #endif
-        } else if (rq_eng == 3 || rq_eng == 4) {
+        } else if (rq_eng == 3) {
 #ifdef HAVE_SAM
-            if (rq_eng == 4) sam_say_ru(t, es); else sam_say(t, es);
+            sam_say(t, es);
+#endif
+        } else if (rq_eng == 5) {
+#ifdef HAVE_RHVOICE
+            rh_say(rq_voice, t, es);
 #endif
         } else {
 #ifdef HAVE_ESPEAK
@@ -678,9 +611,10 @@ static void clip(const char *s, char *d, int max) {
 }
 
 /* ---------------- голоса / история ---------------- */
-typedef struct { const char *label; int eng; int arg; } Voice;
+/* lang: 0 английский, 1 русский; name — имя голоса RHVoice */
+typedef struct { const char *label; int eng; int arg; int lang; const char *name; } Voice;
 static Voice ev[12];
-static int nev, cur;
+static int nev, cur, cur_en = -1, cur_ru = -1;
 static int speed = 100, pitch = 100, volume = 100, style;
 static const char *stylev[] = {"", "+m3", "+m6", "+f2", "+f4", "+croak"};
 #define NSTYLE 6
@@ -728,15 +662,15 @@ static void speak_ex(const char *t, int cap) {
     if (!g_ready || !t[0]) return;
     int lang = detect(t), eng;
     char vn[40];
-#ifdef HAVE_SAM
-    if (lang == 1 && ev[cur].eng == 3) { eng = 4; snprintf(vn, sizeof vn, "0"); }   /* голос SAM + русский текст = робо-русский */
-    else
-#endif
-    if (lang == 1) { eng = 1; snprintf(vn, sizeof vn, "ru%s", stylev[style]); }
-    else if (lang == 2) { eng = 1; snprintf(vn, sizeof vn, "ja%s", stylev[style]); }
-    else {
-        eng = ev[cur].eng;
-        if (eng == 0 || eng == 3) snprintf(vn, sizeof vn, "%d", ev[cur].arg);
+    if (lang == 1) {                                   /* кириллица: выбранный русский голос */
+        const Voice *v = cur_ru >= 0 ? &ev[cur_ru] : NULL;
+        if (v && v->eng == 5) { eng = 5; snprintf(vn, sizeof vn, "%s", v->name); }
+        else { eng = 1; snprintf(vn, sizeof vn, "ru%s", stylev[style]); }
+    } else if (lang == 2) { eng = 1; snprintf(vn, sizeof vn, "ja%s", stylev[style]); }
+    else {                                             /* остальное: выбранный английский голос */
+        const Voice *v = cur_en >= 0 ? &ev[cur_en] : &ev[cur];
+        eng = v->eng;
+        if (eng == 0 || eng == 3) snprintf(vn, sizeof vn, "%d", v->arg);
         else snprintf(vn, sizeof vn, "en-us%s", stylev[style]);
     }
     request(eng, t, vn, cap);
@@ -829,15 +763,27 @@ int main(void) {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
 #ifdef HAVE_PICO
-    ev[nev++] = (Voice){"Pico US (SVOX)", 0, 0};
-    ev[nev++] = (Voice){"Pico UK (SVOX)", 0, 1};
+    ev[nev++] = (Voice){"Pico US (SVOX)", 0, 0, 0, NULL};
+    ev[nev++] = (Voice){"Pico UK (SVOX)", 0, 1, 0, NULL};
 #endif
 #ifdef HAVE_ESPEAK
-    ev[nev++] = (Voice){"eSpeak EN (retro)", 1, 0};
+    ev[nev++] = (Voice){"eSpeak EN (retro)", 1, 0, 0, NULL};
 #endif
 #ifdef HAVE_SAM
-    ev[nev++] = (Voice){"SAM C64", 3, 0};
+    ev[nev++] = (Voice){"SAM C64", 3, 0, 0, NULL};
 #endif
+#ifdef HAVE_RHVOICE
+    ev[nev++] = (Voice){"RHVoice Aleksandr (RU)", 5, 0, 1, "Aleksandr-hq"};
+    ev[nev++] = (Voice){"RHVoice Anna (RU)", 5, 1, 1, "Anna"};
+#endif
+#ifdef HAVE_ESPEAK
+    ev[nev++] = (Voice){"eSpeak RU (retro)", 1, 1, 1, NULL};
+#endif
+    for (int i = 0; i < nev; i++) {            /* выбор по умолчанию: первый голос каждого языка */
+        if (ev[i].lang == 0 && cur_en < 0) cur_en = i;
+        if (ev[i].lang == 1 && cur_ru < 0) cur_ru = i;
+    }
+    cur = cur_en >= 0 ? cur_en : 0;
     hist_load();
 
     SceUID ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0x40000, NULL);
@@ -845,7 +791,8 @@ int main(void) {
     if (ath < 0) ath = sceKernelCreateThread("aud", audio_thread, 0x10000100, 0x10000, 0, 0, NULL);
     sceKernelStartThread(ath, 0, NULL);
 
-    SceUID th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0x20000, NULL);
+    SceUID th = sceKernelCreateThread("tts", worker, 0x10000100, 0x400000, 0, 0x20000, NULL);
+    if (th < 0) th = sceKernelCreateThread("tts", worker, 0x10000100, 0x400000, 0, 0, NULL);
     if (th < 0) th = sceKernelCreateThread("tts", worker, 0x10000100, 0x100000, 0, 0, NULL);
     sceKernelStartThread(th, 0, NULL);
 
@@ -912,10 +859,10 @@ int main(void) {
             /* ---- обычный режим ---- */
             if (pr & SCE_CTRL_START) break;
             if (pr & SCE_CTRL_LTRIGGER) {
-                if (selh) style = (style + NSTYLE - 1) % NSTYLE; else cur = (cur + nev - 1) % nev;
+                if (selh) style = (style + NSTYLE - 1) % NSTYLE; else { cur = (cur + nev - 1) % nev; if (ev[cur].lang) cur_ru = cur; else cur_en = cur; }
             }
             if (pr & SCE_CTRL_RTRIGGER) {
-                if (selh) style = (style + 1) % NSTYLE; else cur = (cur + 1) % nev;
+                if (selh) style = (style + 1) % NSTYLE; else { cur = (cur + 1) % nev; if (ev[cur].lang) cur_ru = cur; else cur_en = cur; }
             }
             if (pr & (SCE_CTRL_UP | SCE_CTRL_DOWN)) {
                 if (selh) {
@@ -978,7 +925,12 @@ int main(void) {
             }
         } else {
             T(180, 34, COL_DIM, 0.9f, "%s", g_ready ? ((g_busy || g_play) ? "SPEAKING" : "ready") : "loading...");
-            T(20, 66, COL_TXT, 0.95f, "Voice (L/R): %s    eSpeak style (Sel+L/R): %s", ev[cur].label, stylev[style][0] ? stylev[style] : "default");
+            T(20, 66, COL_TXT, 0.95f, "Voice (L/R): EN %s | RU %s   eSpeak style (Sel+L/R): %s",
+              cur_en >= 0 ? ev[cur_en].label : "-", cur_ru >= 0 ? ev[cur_ru].label : "-", stylev[style][0] ? stylev[style] : "default");
+#ifdef HAVE_RHVOICE
+            if (g_ready && !rh_ok) T(520, 34, RGBA8(230, 90, 90, 255), 0.8f, "RHVoice: not loaded");
+            else if (g_audio_ms > 0) T(520, 34, COL_DIM, 0.8f, "synth %d ms / audio %d ms (x%.2f)", g_synth_ms, g_audio_ms, (float)g_synth_ms / g_audio_ms);
+#endif
             T(20, 92, COL_TXT, 0.95f, "Speed %d%%   Pitch %d%%   Volume %d%%", speed, pitch, volume);
             vita2d_draw_rectangle(20, 110, 920, 46, COL_BOX);
             T(34, 142, COL_ACC, 1.1f, "[X] / tap here: type a phrase and speak");

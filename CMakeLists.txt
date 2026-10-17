@@ -2,16 +2,17 @@ cmake_minimum_required(VERSION 3.5)
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain")
 endif()
-project(VitaTTS C)
+project(VitaTTS C CXX)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaTTS")
 set(VITA_TITLEID  "VTTS00001")
 set(VITA_VERSION  "01.00")
 
-# задаются из workflow: -DWITH_PICO=ON/OFF -DWITH_ESPEAK=ON/OFF -DWITH_MBROWRAP=ON/OFF
-# -DPICO_LIB=... -DESPEAK_DIR=... -DPAYLOAD=... -DICON=...
+# задаются из workflow: -DWITH_PICO=ON/OFF -DWITH_ESPEAK=ON/OFF -DWITH_MBROWRAP=ON/OFF -DWITH_SAM=ON/OFF -DWITH_RHVOICE=ON/OFF
+# -DPICO_LIB=... -DESPEAK_DIR=... -DSAM_DIR=... -DRH_DIR=... -DPAYLOAD=... -DICON=...
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -w -std=gnu11 -D_GNU_SOURCE")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-q -O2 -w -std=gnu++17 -D_GNU_SOURCE")
 
 set(LIBS "")
 set(VL "$ENV{VITASDK}/arm-vita-eabi/lib")
@@ -61,7 +62,27 @@ if(WITH_ESPEAK)
   list(APPEND LIBS ttsespeak)
 endif()
 
+# ---------- RHVoice (русский, HTS) ----------
+# RH_DIR — подготовленная workflow копия RHVoice: src/ (с config.h и заглушкой package_client.hpp) и boost_inc/ (заголовки Boost)
+if(WITH_RHVOICE)
+  file(GLOB RH_CORE "${RH_DIR}/src/core/*.cpp")
+  list(FILTER RH_CORE EXCLUDE REGEX "/(emoji_data|unidata|mage_hts_engine_impl)\\.cpp$")
+  file(GLOB RH_HTS "${RH_DIR}/src/hts_engine/*.c")
+  add_library(ttsrh STATIC ${RH_CORE} ${RH_HTS} "${RH_DIR}/src/lib/lib.cpp")
+  target_include_directories(ttsrh PRIVATE
+    "${RH_DIR}/src/include" "${RH_DIR}/src/include/core" "${RH_DIR}/src/core" "${RH_DIR}/src"
+    "${RH_DIR}/src/hts_engine" "${RH_DIR}/src/third-party/utf8" "${RH_DIR}/src/third-party/rapidxml"
+    "${RH_DIR}/boost_inc")
+  target_compile_definitions(ttsrh PRIVATE "VERSION=\"1.16.0\"" HTS_EMBEDDED MAX_RATE=3)
+  list(APPEND LIBS ttsrh)
+endif()
+
 add_executable(${PROJECT_NAME} main.c)
+if(WITH_RHVOICE)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_RHVOICE)
+  target_include_directories(${PROJECT_NAME} PRIVATE "${RH_DIR}/src/include")
+  set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)   # libstdc++ для RHVoice
+endif()
 if(WITH_PICO)
   target_compile_definitions(${PROJECT_NAME} PRIVATE HAVE_PICO)
   target_include_directories(${PROJECT_NAME} PRIVATE "${PICO_LIB}")
@@ -96,6 +117,12 @@ endif()
 if(WITH_ESPEAK)
   file(GLOB_RECURSE EF RELATIVE "${PAYLOAD}" "${PAYLOAD}/espeak-ng-data/*")
   foreach(f ${EF})
+    list(APPEND VPKF "${PAYLOAD}/${f}" "${f}")
+  endforeach()
+endif()
+if(WITH_RHVOICE)
+  file(GLOB_RECURSE RF RELATIVE "${PAYLOAD}" "${PAYLOAD}/rh/*")
+  foreach(f ${RF})
     list(APPEND VPKF "${PAYLOAD}/${f}" "${f}")
   endforeach()
 endif()
