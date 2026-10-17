@@ -197,7 +197,7 @@ def reg(name, img, pad):
 def make_buttons():
     styles = {"cream": (CREAM_L, CREAM_D, None), "yellow": ((255, 224, 96), (240, 176, 28), (EDGE, (140, 100, 20))),
               "orange": ((255, 156, 96), ORG_D, ((170, 80, 40), (120, 50, 20)))}
-    for sz, w, h, r in (("btn", 188, 44, 12), ("pill", 140, 36, 10), ("big", 330, 100, 24)):
+    for sz, w, h, r in (("btnw", 284, 44, 12), ("pill", 140, 36, 10), ("big", 330, 100, 24)):
         for st, (t, b, rim) in styles.items():
             if sz == "big" and st == "cream":
                 continue
@@ -303,6 +303,11 @@ def make_icons():
     d = ImageDraw.Draw(cv)
     d.polygon([(16 * SS, 8 * SS), (48 * SS, 28 * SS), (16 * SS, 48 * SS)], fill=ink)
     reg("ic_play_big", fin(cv, s), 0)
+    # stop большой
+    cv, s = icon_canvas(56)
+    d = ImageDraw.Draw(cv)
+    d.rounded_rectangle([14 * SS, 14 * SS, 42 * SS, 42 * SS], radius=5 * SS, fill=ink)
+    reg("ic_stop_big", fin(cv, s), 0)
     # stop
     cv, s = icon_canvas(28)
     d = ImageDraw.Draw(cv)
@@ -370,9 +375,9 @@ def body(mode):
 
     f_tag = font(FB, 11)
     # логотип
-    fl = font(FBO, 46)
-    text(cv, (36, 11), "+", fl, RED + (255,))
-    text(cv, (66, 11), "VITA", fl, RED + (255,), spacing=3)
+    fl = font(FBO, 40)
+    text(cv, (30, 14), "Vita", fl, RED + (255,), spacing=1)
+    text(cv, (30 + text_w("Vita", fl, 1) + 2, 14), "TTS", fl, INK + (255,), spacing=1)
     text(cv, (204, 17), "TEXT TO SPEECH", f_tag, INK_L + (255,), spacing=1)
     text(cv, (204, 32), "FOR EXPERIMENTAL", f_tag, INK_L + (255,), spacing=1)
     text(cv, (204, 47), "& ELECTRONIC MUSIC", f_tag, INK_L + (255,), spacing=1)
@@ -380,13 +385,13 @@ def body(mode):
     d.line([(192, 16), (192, 56)], fill=EDGE + (255,), width=1)
 
     # ЖК-экран
-    LX, LY, LW, LH = 16, 64, 580, 150
+    LX, LY, LW, LH = 16, 64, 580, (200 if mode == "main" else 150)
     bm = mask_rr(LW, LH, 16)
     shadow(cv, bm, LX, LY, dy=3, r=3, a=0.3)
     put(cv, vgrad(LW, LH, (96, 88, 74), (40, 34, 26)), bm, LX, LY)
     put(cv, vgrad(LW, LH, (74, 66, 54), (34, 28, 20)), mask_rr(LW, LH, 16, inset=2), LX, LY)
     put(cv, solid(LW, LH, (255, 255, 255)), ImageChops.subtract(mask_rr(LW, LH, 16, inset=2.5), shift(mask_rr(LW, LH, 16, inset=2.5), 0, 2)), LX, LY, 0.18)
-    SX, SY, SW, SH = 26, 74, 560, 130
+    SX, SY, SW, SH = 26, 74, 560, (180 if mode == "main" else 130)
     sm = mask_rr(SW, SH, 9)
     put(cv, vgrad(SW, SH, LCD_T, LCD_B), sm, SX, SY)
     # сетка пикселей и блик
@@ -408,7 +413,7 @@ def body(mode):
     inner_shadow(cv, sm, SX, SY, dy=3, r=4, a=0.55, col=(70, 40, 0))
     f_lcd = font(FM, 12)
     if mode == "main":
-        text(cv, (SX + 12, SY + 7), "INPUT TEXT", f_lcd, LCD_INK + (200,), spacing=1)
+        text(cv, (SX + 12, SY + 7), "TAP TO TYPE", f_lcd, LCD_INK + (200,), spacing=1)
     else:
         text(cv, (SX + 12, SY + 7), "SYLLABLE MODE", f_lcd, LCD_INK + (200,), spacing=1)
     d = ImageDraw.Draw(cv)
@@ -421,9 +426,9 @@ def body(mode):
     rows = [(318, "SPEED"), (366, "PITCH")] if mode == "main" else [(304, "BPM"), (342, "PITCH"), (380, "SENS")]
     for cy, lb in rows:
         text(cv, (30, cy), lb, f_lab, INK + (255,), anchor="lm", spacing=1)
-        groove(cv, 108, cy, 190)
-    ttl = "eSpeak STYLE" if mode == "main" else "TIMING"
-    text(cv, (380, 281), ttl, font(FB, 11), INK_L + (255,), spacing=1)
+        groove(cv, 108, cy, 400 if mode == "main" else 190)
+    if mode != "main":
+        text(cv, (380, 281), "SYLLABLES", font(FB, 11), INK_L + (255,), spacing=1)
 
     # нижняя правая панель (громкость, диагностика)
     sunk(cv, 358, 418, 238, 110, 12, CREAM_D, (222, 212, 186))
@@ -453,6 +458,50 @@ def groove(cv, x, cy, w):
     sunk(cv, x - 4, cy - h // 2, w + 8, h, 5, (176, 164, 138), (206, 196, 170), border=True, a=0.6)
 
 
+# ---------- иконка приложения (128x128, LiveArea) ----------
+def app_icon():
+    S = 128
+    cv = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    # корпус
+    m = mask_rr(S - 8, S - 8, 26)
+    shadow(cv, m, 4, 4, dy=3, r=3, a=0.35)
+    put(cv, vgrad(S - 8, S - 8, EDGE, EDGE_D), m, 4, 4)
+    put(cv, vgrad(S - 8, S - 8, CREAM_L, CREAM_D), mask_rr(S - 8, S - 8, 26, inset=2.5), 4, 4)
+    # речевой пузырь с ЖК-заливкой и хвостиком
+    bw, bh = 96, 62
+    bx, by = 16, 20
+    big = Image.new("L", (S * SS, S * SS), 0)
+    d = ImageDraw.Draw(big)
+    d.rounded_rectangle([bx * SS, by * SS, (bx + bw) * SS, (by + bh) * SS], radius=16 * SS, fill=255)
+    d.polygon([((bx + 22) * SS, (by + bh - 4) * SS), ((bx + 14) * SS, (by + bh + 22) * SS), ((bx + 48) * SS, (by + bh - 4) * SS)], fill=255)
+    bm = big.resize((S, S), Image.BOX)
+    sh = Image.new("L", (S, S), 0)
+    sh.paste(bm, (0, 3))
+    put(cv, solid(S, S, (60, 40, 10)), blur(sh, 2), 0, 0, 0.35)
+    put(cv, solid(S, S, (70, 50, 12)), bm, 0, 0)
+    inner = Image.new("L", (S * SS, S * SS), 0)
+    d = ImageDraw.Draw(inner)
+    d.rounded_rectangle([(bx + 3) * SS, (by + 3) * SS, (bx + bw - 3) * SS, (by + bh - 3) * SS], radius=13 * SS, fill=255)
+    d.polygon([((bx + 25) * SS, (by + bh - 6) * SS), ((bx + 17) * SS, (by + bh + 16) * SS), ((bx + 42) * SS, (by + bh - 6) * SS)], fill=255)
+    im = inner.resize((S, S), Image.BOX)
+    put(cv, vgrad(S, S, LCD_T, LCD_B), im, 0, 0)
+    put(cv, solid(S, S, (255, 255, 255)), ImageChops.subtract(im, shift(im, 0, 3)), 0, 0, 0.45)
+    # звуковая дорожка из столбиков внутри пузыря
+    dd = ImageDraw.Draw(cv)
+    hs = [10, 20, 32, 22, 38, 26, 16, 28, 12]
+    x0 = bx + 12
+    for i, hh in enumerate(hs):
+        x = x0 + i * 8.5
+        yc = by + bh / 2
+        bar = Image.new("L", (S * SS, S * SS), 0)
+        ImageDraw.Draw(bar).rounded_rectangle([x * SS, (yc - hh / 2) * SS, (x + 5) * SS, (yc + hh / 2) * SS], radius=2.5 * SS, fill=255)
+        put(cv, solid(S, S, LCD_INK), bar.resize((S, S), Image.BOX), 0, 0)
+    # красный плюс-метка внизу справа
+    f = font(FBO, 20)
+    text(cv, (S - 18 - text_w("TTS", f, 1), S - 36), "TTS", f, RED + (255,), spacing=1)
+    return cv
+
+
 # ---------- атлас ----------
 def pack(items, width=1024):
     x = y = rowh = 0
@@ -477,6 +526,9 @@ def main():
     items = sorted(SPR.items(), key=lambda kv: (-kv[1][0].size[1], kv[0]))
     atlas, pos = pack(items)
     atlas.save(os.path.join(ROOT, "assets", "atlas.png"), optimize=True)
+    ic = app_icon()
+    ic.save(os.path.join(ROOT, "assets", "icon0.png"), optimize=True)
+    ic.save(os.path.join(ROOT, "design", "icon0.png"))
     for name, (img, pad) in SPR.items():
         img.save(os.path.join(ROOT, "design", "parts", name + ".png"))
     for mode in ("main", "syl"):

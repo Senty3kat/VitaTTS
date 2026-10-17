@@ -188,28 +188,6 @@ jobs:
         continue-on-error: true
         run: git clone --depth 1 https://github.com/s-macke/SAM
 
-      - name: Иконка
-        run: |
-          python3 - <<'EOF'
-          import zlib, struct, math
-          W = 128
-          pix = [[0] * W for _ in range(W)]
-          for x in range(W):
-              y = int(64 + 32 * math.sin(x / 128 * 2 * math.pi * 3) * (1 - abs(x - 64) / 80))
-              for d in range(-2, 3):
-                  if 0 <= y + d < W:
-                      pix[y + d][x] = 1
-          raw = b''.join(b'\x00' + bytes(r) for r in pix)
-          def ch(t, d):
-              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
-          png = (b'\x89PNG\r\n\x1a\n'
-                 + ch(b'IHDR', struct.pack('>IIBBBBB', W, W, 8, 3, 0, 0, 0))
-                 + ch(b'PLTE', bytes([24, 24, 40, 0, 230, 170]))
-                 + ch(b'IDAT', zlib.compress(raw))
-                 + ch(b'IEND', b''))
-          open('icon0.png', 'wb').write(png)
-          EOF
-
       - name: Сборка VPK (с запасными вариантами)
         run: |
           export PATH=$VITASDK/bin:$PATH
@@ -251,7 +229,7 @@ jobs:
                  -DPICO_LIB="$PL" \
                  -DESPEAK_DIR=$GITHUB_WORKSPACE/espeak-ng \
                  -DPAYLOAD=$GITHUB_WORKSPACE/payload \
-                 -DICON=$GITHUB_WORKSPACE/icon0.png \
+                 -DICON=$GITHUB_WORKSPACE/assets/icon0.png \
                && make -j4 ; } > $GITHUB_WORKSPACE/log_$N.txt 2>&1 ; then
               cd ..; OK=1; echo "Собрано: pico=$1 espeak=$2 sam=$4 rhvoice=$5"
               echo "::notice title=Собрано::pico=$1 espeak=$2 sam=$4 rhvoice=$5 (вариант $N)"; break

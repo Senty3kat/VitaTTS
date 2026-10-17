@@ -68,6 +68,7 @@ static int sylb[MAXSYL + 2];               /* границы слогов (в с
 static volatile int nsyl, sy_idx, g_sy_ready, g_sy_last = -1;
 static volatile int g_sylmode, trig_pending, auto_run, quant, g_resync;
 static volatile int bpm = 120, subdiv = 1, sens = 16;
+static volatile int fullsyl;      /* слоги проговариваются до конца: новый запуск не обрывает текущий */
 static volatile unsigned long long g_tick_t;
 static float gain = 1.0f;     /* громкость */
 
@@ -82,6 +83,16 @@ static short ring[RING] __attribute__((aligned(64)));
 static short bufs[3][GMAX] __attribute__((aligned(64)));
 static volatile unsigned rhead, rtail;
 static volatile int g_flush, g_done, g_play;
+
+static int a_fail;
+/* вывод буфера; при ошибках порта (звук «отвалился» после диалога, сна и т.п.) порт открывается заново */
+static void aout(short *b) {
+    int r = aport >= 0 ? sceAudioOutOutput(aport, b) : -1;
+    if (r < 0) {
+        sceKernelDelayThread(3000);
+        if (++a_fail >= 10) { g_reopen = 1; a_fail = 0; }
+    } else a_fail = 0;
+}
 
 static void audio_open(void) {
     if (aport >= 0) { sceAudioOutReleasePort(aport); aport = -1; }
@@ -124,6 +135,7 @@ static void sy_grain(int *bip) {
                 if (tick) fire = 1;
             } else if (trig_pending && (!quant || tick)) fire = 1;
         }
+        if (fire && fullsyl && vpos < vend) { fire = 0; trig_pending = 0; }   /* FULL: слог доигрывается до конца */
         if (fire) {
             trig_pending = 0;
             int idx = sy_idx % nsyl;
@@ -145,7 +157,7 @@ static void sy_grain(int *bip) {
         ab[i] = sm > 32767.0f ? 32767 : (sm < -32768.0f ? -32768 : (short)sm);
     }
     clk += G;
-    if (aport >= 0) sceAudioOutOutput(aport, ab); else sceKernelDelayThread(2000);
+    aout(ab);
     *bip = (*bip + 1) % 3;
 }
 
@@ -170,14 +182,14 @@ static int audio_thread(SceSize args, void *argp) {
             /* недогруз: тишина вместо мусора, затем заново набираем предбуфер */
             g_under++;
             memset(ab, 0, G * sizeof(short));
-            if (aport >= 0) sceAudioOutOutput(aport, ab);
+            aout(ab);
             bi = (bi + 1) % 3; playing = 0;
             continue;
         }
         __sync_synchronize();
         for (int i = 0; i < G; i++) ab[i] = i < n ? ring[(rtail + i) & (RING - 1)] : 0;
         rtail += n;
-        if (n > 0 && aport >= 0) sceAudioOutOutput(aport, ab);
+        if (n > 0) aout(ab);
         bi = (bi + 1) % 3;               /* тройная буферизация */
         if (n < G) { playing = 0; g_play = 0; }
     }
@@ -391,9 +403,15 @@ static void sam_run(char *in, int es) {
     unsigned char *b = (unsigned char *)GetBuffer();
     int cnt = GetBufferLength() / 50;
     if (!b || cnt <= 0 || cnt > 220000) return;
+    b[0] = 128;                                          /* первый отсчёт буфера SAM не инициализирован: щелчок */
     for (int i = 0; i < cnt; i++) {
         int v = ((int)b[i] - 128) * 200;     /* постоянный уровень: без «качания» громкости между кусками */
         pcm[i] = (short)(v > 30000 ? 30000 : (v < -30000 ? -30000 : v));
+    }
+    for (int i = 0; i < 80 && i < cnt / 2; i++) {          /* короткие плавные края куска: без щелчков на стыках */
+        float f = i / 80.0f;
+        pcm[i] = (short)(pcm[i] * f);
+        pcm[cnt - 1 - i] = (short)(pcm[cnt - 1 - i] * f);
     }
     emit(pcm, cnt, 22050);
 }
@@ -414,6 +432,7 @@ static void sam_say(const char *txt, int es) {
             if (c >= 128) continue;
             c = (unsigned char)toupper(c);
             char o;
+            if (c == '\'') continue;                         /* don't -> DONT */
             if ((c >= 'A' && c <= 'Z') || c == '.' || c == ',' || c == '?' || c == '!' || c == '-') o = (char)c;
             else if (c >= '0' && c <= '9') o = (char)c;
             else o = ' ';
@@ -614,10 +633,8 @@ static void clip(const char *s, char *d, int max) {
 /* lang: 0 английский, 1 русский; name — имя голоса RHVoice */
 typedef struct { const char *label; int eng; int arg; int lang; const char *name; } Voice;
 static Voice ev[12];
-static int nev, cur, cur_en = -1, cur_ru = -1;
-static int speed = 100, pitch = 100, volume = 100, style;
-static const char *stylev[] = {"", "+m3", "+m6", "+f2", "+f4", "+croak"};
-#define NSTYLE 6
+static int nev, cur;
+static int speed = 100, pitch = 100, volume = 100;
 static char hist[HN][HL];
 static int hn, sel;
 
@@ -658,22 +675,84 @@ static void request(int eng, const char *t, const char *vn, int cap) {
     g_req = 1;
 }
 
-static void speak_ex(const char *t, int cap) {
-    if (!g_ready || !t[0]) return;
-    int lang = detect(t), eng;
-    char vn[40];
-    if (lang == 1) {                                   /* кириллица: выбранный русский голос */
-        const Voice *v = cur_ru >= 0 ? &ev[cur_ru] : NULL;
-        if (v && v->eng == 5) { eng = 5; snprintf(vn, sizeof vn, "%s", v->name); }
-        else { eng = 1; snprintf(vn, sizeof vn, "ru%s", stylev[style]); }
-    } else if (lang == 2) { eng = 1; snprintf(vn, sizeof vn, "ja%s", stylev[style]); }
-    else {                                             /* остальное: выбранный английский голос */
-        const Voice *v = cur_en >= 0 ? &ev[cur_en] : &ev[cur];
-        eng = v->eng;
-        if (eng == 0 || eng == 3) snprintf(vn, sizeof vn, "%d", v->arg);
-        else snprintf(vn, sizeof vn, "en-us%s", stylev[style]);
+/* Транслитерация: «чужой» голос читает текст как свой язык. Русский голос получает латиницу кириллицей
+   («хелло»), английский — кириллицу латиницей («privet»). Работает по символам, смешанный текст тоже. */
+static void tr_cyr2lat(const char *s, char *o, int om) {
+    static const char *L[32] = {"a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+                                "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"};
+    const unsigned char *p = (const unsigned char *)s;
+    int n = 0;
+    while (*p && n < om - 6) {
+        const unsigned char *q = p;
+        int c = dec(&q);
+        const char *r = NULL;
+        if (c >= 0x410 && c <= 0x42F) r = L[c - 0x410];
+        else if (c >= 0x430 && c <= 0x44F) r = L[c - 0x430];
+        else if (c == 0x451 || c == 0x401) r = "yo";
+        if (r) { while (*r && n < om - 1) o[n++] = *r++; }
+        else { while (p < q && n < om - 1) o[n++] = (char)*p++; }
+        p = q;
     }
-    request(eng, t, vn, cap);
+    o[n] = 0;
+}
+
+static void tr_lat2cyr(const char *s, char *o, int om) {
+    int n = 0;
+#define PUT(u) do { const char *z_ = (u); while (*z_ && n < om - 1) o[n++] = *z_++; } while (0)
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p && n < om - 8) {
+        if (*p >= 128 || !isalpha(*p)) { o[n++] = (char)*p++; continue; }
+        int c = tolower(*p), d = p[1] ? tolower(p[1]) : 0;
+        if (c == 's' && d == 'h') { PUT("ш"); p += 2; continue; }
+        if (c == 'c' && d == 'h') { PUT("ч"); p += 2; continue; }
+        if (c == 'z' && d == 'h') { PUT("ж"); p += 2; continue; }
+        if (c == 'k' && d == 'h') { PUT("х"); p += 2; continue; }
+        if (c == 't' && d == 's') { PUT("ц"); p += 2; continue; }
+        if (c == 't' && d == 'h') { PUT("з"); p += 2; continue; }
+        if (c == 'p' && d == 'h') { PUT("ф"); p += 2; continue; }
+        if (c == 'c' && d == 'k') { PUT("к"); p += 2; continue; }
+        if (c == 'e' && d == 'e') { PUT("и"); p += 2; continue; }
+        if (c == 'o' && d == 'o') { PUT("у"); p += 2; continue; }
+        if (c == 'q' && d == 'u') { PUT("кв"); p += 2; continue; }
+        if (c == 'y' && d == 'a') { PUT("я"); p += 2; continue; }
+        if (c == 'y' && d == 'u') { PUT("ю"); p += 2; continue; }
+        if (c == 'y' && d == 'o') { PUT("ё"); p += 2; continue; }
+        switch (c) {
+        case 'a': PUT("а"); break; case 'b': PUT("б"); break;
+        case 'c': PUT((d == 'e' || d == 'i' || d == 'y') ? "с" : "к"); break;
+        case 'd': PUT("д"); break; case 'e': PUT("е"); break; case 'f': PUT("ф"); break;
+        case 'g': PUT("г"); break; case 'h': PUT("х"); break; case 'i': PUT("и"); break;
+        case 'j': PUT("дж"); break; case 'k': PUT("к"); break; case 'l': PUT("л"); break;
+        case 'm': PUT("м"); break; case 'n': PUT("н"); break; case 'o': PUT("о"); break;
+        case 'p': PUT("п"); break; case 'q': PUT("к"); break; case 'r': PUT("р"); break;
+        case 's': PUT("с"); break; case 't': PUT("т"); break; case 'u': PUT("у"); break;
+        case 'v': PUT("в"); break; case 'w': PUT("в"); break; case 'x': PUT("кс"); break;
+        case 'y': PUT("и"); break; default: PUT("з"); break;
+        }
+        p++;
+    }
+    o[n] = 0;
+#undef PUT
+}
+
+/* Любой текст любым голосом (выбран один голос). Японский всегда через eSpeak — другие движки его не читают. */
+static void speak_ex(const char *t, int cap) {
+    if (!g_ready || !t[0] || !nev) return;
+    static char tb[HL * 4];
+    const Voice *v = &ev[cur];
+    int eng;
+    char vn[40];
+    const char *tx = t;
+    if (detect(t) == 2) { eng = 1; snprintf(vn, sizeof vn, "ja"); }
+    else {
+        eng = v->eng;
+        if (v->lang == 1) tr_lat2cyr(t, tb, sizeof tb); else tr_cyr2lat(t, tb, sizeof tb);
+        tx = tb;
+        if (eng == 0 || eng == 3) snprintf(vn, sizeof vn, "%d", v->arg);
+        else if (eng == 5) snprintf(vn, sizeof vn, "%s", v->name);
+        else snprintf(vn, sizeof vn, "%s", v->arg ? "ru" : "en-us");
+    }
+    request(eng, tx, vn, cap);
 }
 
 static void speak(const char *t) { speak_ex(t, 0); }
@@ -788,7 +867,9 @@ static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
 #define LCD_X 26
 #define LCD_Y 74
 #define LCD_W 560
-#define LCD_H 130
+#define LCD_H_MAIN 180
+#define LCD_H_SYL 130
+#define APP_VER "v2.20"
 #define PILL_X 456
 #define PILL_Y 16
 #define ROW_Y 224
@@ -802,7 +883,7 @@ static const int SL_MIN[SL_N] = {50, 50, 20, 40, 5}, SL_MAX[SL_N] = {250, 200, 2
 
 static int sl_geo(int id, int *x, int *cy, int *w) {
     int sy = g_sylmode;
-    *x = 108; *w = 190;
+    *x = 108; *w = sy ? 190 : 400;
     switch (id) {
     case SL_SPEED: if (sy) return 0; *cy = 318; return 1;
     case SL_PITCH: *cy = sy ? 342 : 366; return 1;
@@ -831,9 +912,23 @@ static int u_down, u_press, u_rel, u_tx, u_ty, u_drag = -1, u_dirty;
 static int inr(int x, int y, int w, int h) { return u_down && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
 static int tapr(int x, int y, int w, int h) { return u_press && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
 
-static void select_voice(int i) {
-    cur = i;
-    if (ev[i].lang) cur_ru = i; else cur_en = i;
+static void select_voice(int i) { cur = i; }
+
+/* тап-темпо: средний интервал последних касаний -> BPM */
+static void tap_tempo(void) {
+    static unsigned long long last, iv[4];
+    static int n;
+    unsigned long long now = sceKernelGetProcessTimeWide();
+    if (last && now - last < 2000000ULL) {
+        for (int i = 3; i > 0; i--) iv[i] = iv[i - 1];
+        iv[0] = now - last;
+        if (n < 4) n++;
+        unsigned long long sum = 0;
+        for (int i = 0; i < n; i++) sum += iv[i];
+        int b = (int)(60000000.0 * n / (double)sum + 0.5);
+        sl_set(SL_BPM, b);
+    } else n = 0;
+    last = now;
 }
 
 static void ui_events(int *do_new, int *do_edit) {
@@ -847,32 +942,27 @@ static void ui_events(int *do_new, int *do_edit) {
         }
         if (u_drag < 0) {
             if (tapr(PILL_X, PILL_Y, 140, 36)) set_sylmode(!sy);
-            else if (tapr(LCD_X, LCD_Y, LCD_W, LCD_H)) { if (sy || !hn) *do_new = 1; else *do_edit = 1; }
-            else if (tapr(BIG_X, BIG_Y, 330, 100)) *do_new = 1;
-            for (int i = 0; i < 3; i++) {
-                if (!tapr(16 + i * 196, ROW_Y, 188, 44)) continue;
-                if (!sy) {
-                    if (i == 0 && hn) speak(hist[sel]);
-                    else if (i == 1 && hn) *do_edit = 1;
-                    else if (i == 2) { g_abort = 1; g_flush = 1; }
-                } else {
-                    if (i == 0) { sy_idx = 0; trig_pending = 0; }
-                    else if (i == 1) trig_pending = 1;
-                    else set_sylmode(0);
-                }
+            else if (tapr(LCD_X, LCD_Y, LCD_W, sy ? 130 : 180)) { if (sy || !hn) *do_new = 1; else *do_edit = 1; }
+            else if (tapr(BIG_X, BIG_Y, 330, 100)) {
+                if (sy) { auto_run = !auto_run; trig_pending = 0; if (auto_run) g_resync = 1; }
+                else if (g_busy || g_play) { g_abort = 1; g_flush = 1; }          /* во время речи кнопка = стоп */
+                else if (hn) speak(hist[sel]);
+                else *do_new = 1;
             }
-            for (int i = 0; i < 6; i++) {
-                if (!tapr(380 + (i % 2) * 110, 300 + (i / 2) * 36, 102, 30)) continue;
-                if (!sy) style = i;
-                else if (i == 0) quant = !quant;
-                else if (i <= 4) subdiv = i;
-                else { auto_run = !auto_run; trig_pending = 0; if (auto_run) g_resync = 1; }
+            if (sy) {
+                if (tapr(16, ROW_Y, 284, 44)) { sy_idx = 0; trig_pending = 0; }          /* REWIND */
+                if (tapr(312, ROW_Y, 284, 44)) trig_pending = 1;                         /* NEXT */
+                for (int i = 0; i < 6; i++) {
+                    if (!tapr(380 + (i % 2) * 110, 300 + (i / 2) * 36, 102, 30)) continue;
+                    if (i == 0) fullsyl = !fullsyl;
+                    else if (i == 1) tap_tempo();
+                    else subdiv = i - 1;
+                }
             }
             for (int i = 0; i < nev && i < 7; i++) {
                 if (!tapr(624, VOI_Y + i * 30, 308, 28)) continue;
                 select_voice(i);
-                if (!sy) speak(ev[i].lang ? "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82, \xD1\x8D\xD1\x82\xD0\xBE \xD0\x92\xD0\xB8\xD1\x82\xD0\xB0." : "Hello, this is VITA.");
-                else if (hn && detect(hist[sel]) == ev[i].lang) sy_render();
+                if (sy && hn) sy_render();                  /* слоги зависят от голоса: пересобрать фразу */
             }
             for (int i = 0; i < hn; i++) {
                 if (!tapr(624, HIS_Y + i * 32, 308, 30)) continue;
@@ -903,34 +993,28 @@ static void ui_events(int *do_new, int *do_edit) {
 }
 
 /* ---------- рисование ---------- */
-static const Voice *active_voice(void) {
-    int lang = hn ? detect(hist[sel]) : 0;
-    if (lang == 1) return cur_ru >= 0 ? &ev[cur_ru] : NULL;
-    if (lang == 2) return NULL;
-    return cur_en >= 0 ? &ev[cur_en] : (nev ? &ev[cur] : NULL);
-}
-
-static void draw_btn(int i, int style, int icon, const char *label, const char *hint) {
-    int x = 16 + i * 196, y = ROW_Y, p = inr(x, y, 188, 44);
-    static const int ids[2][2] = {{S_BTN_CREAM, S_BTN_CREAM_P}, {S_BTN_YELLOW, S_BTN_YELLOW_P}};
+static void draw_btnw(int i, int style, int icon, const char *label, const char *hint) {
+    int x = 16 + i * 296, y = ROW_Y, p = inr(x, y, 284, 44);
+    static const int ids[2][2] = {{S_BTNW_CREAM, S_BTNW_CREAM_P}, {S_BTNW_YELLOW, S_BTNW_YELLOW_P}};
     spr(ids[style][p], x, y);
-    spr(icon, x + 14, y + 8 + p);
-    ftx(f_ui, x + 50, y + 29 + p, COL_INK, 16, label);
-    ftr(f_ui, x + 176, y + 28 + p, COL_DIM, 11, hint);
+    spr(icon, x + 20, y + 8 + p);
+    ftx(f_ui, x + 58, y + 29 + p, COL_INK, 17, label);
+    ftr(f_ui, x + 268, y + 28 + p, COL_DIM, 11, hint);
 }
 
 static void draw_lcd(void) {
     char t[64];
     int sy = g_sylmode;
+    int lh = sy ? LCD_H_SYL : LCD_H_MAIN;
     if (!sy) {
         if (hn) { snprintf(t, sizeof t, "%d/%d", ncp(hist[sel]), IMEMAX); ftr(f_lcd, LCD_X + LCD_W - 12, LCD_Y + 18, COL_LCD, 12, t); }
-        if (!hn) { ftc(f_ui, LCD_X + LCD_W / 2, LCD_Y + 76, RGBA8(54, 38, 10, 150), 20, "TAP HERE OR PRESS X TO TYPE A PHRASE"); return; }
-        static const int SIZES[] = {24, 20, 17, 14, 12};
-        int ls[8], ll[8], k, n = 0, maxl = 3, cap, sz = 12;
-        for (k = 0; k < 5; k++) {
+        if (!hn) { ftc(f_ui, LCD_X + LCD_W / 2, LCD_Y + lh / 2 + 6, RGBA8(54, 38, 10, 150), 22, "TAP HERE TO TYPE A PHRASE"); return; }
+        static const int SIZES[] = {30, 26, 22, 18, 15, 12};
+        int ls[10], ll[10], k, n = 0, maxl = 3, cap, sz = 12;
+        for (k = 0; k < 6; k++) {
             sz = SIZES[k];
-            maxl = (int)(92.0f / (sz * 1.22f));
-            if (maxl > 7) maxl = 7;
+            maxl = (int)((lh - 40.0f) / (sz * 1.22f));
+            if (maxl > 9) maxl = 9;
             cap = (int)((LCD_W - 28) / (sz * 0.602f));
             n = lcd_wrap(hist[sel], cap, maxl, ls, ll);
             if (n <= maxl) break;
@@ -958,7 +1042,7 @@ static void draw_lcd(void) {
     int sx = LCD_X + 14, sw = LCD_W - 28, y = LCD_Y + 78, h = 40;
     int nn = nsyl;
     if (!g_sy_ready || nn <= 0) {
-        ftc(f_ui, LCD_X + LCD_W / 2, y + 27, RGBA8(54, 38, 10, 170), 17, g_sy_ready ? "NO SYLLABLES - LOWER SENS" : "RENDERING PHRASE...");
+        ftc(f_ui, LCD_X + LCD_W / 2, y + 27, RGBA8(54, 38, 10, 170), 17, g_sy_ready ? "NO SYLLABLES - LOWER SENS" : (hn ? "RENDERING PHRASE..." : "TAP HERE TO TYPE A PHRASE"));
         return;
     }
     float w = (sw - 2.0f * (nn - 1)) / nn;
@@ -984,8 +1068,8 @@ static void ui_draw(void) {
     int speaking = g_busy || g_play;
     spr(!g_ready ? S_LED_RED : (speaking ? S_LED_ORANGE : S_LED_GREEN), 632, 26);
     ftx(f_ui, 658, 40, COL_INK, 17, !g_ready ? "LOADING" : (speaking ? "SPEAKING" : "READY"));
-    ftr(f_ui, 936, 40, COL_DIM, 12, "v2.10");
-    if (sy && (quant || auto_run)) {
+    ftr(f_ui, 936, 40, COL_DIM, 12, APP_VER);
+    if (sy && auto_run) {
         unsigned long long now = sceKernelGetProcessTimeWide();
         spr(now - g_tick_t < 90000ULL ? S_LED_ORANGE : S_LED_OFF, 840, 26);
     }
@@ -998,15 +1082,10 @@ static void ui_draw(void) {
 
     draw_lcd();
 
-    /* ряд кнопок */
-    if (!sy) {
-        draw_btn(0, 0, S_IC_REPEAT, "REPEAT", "O");
-        draw_btn(1, 0, S_IC_EDIT, "EDIT", "TRI");
-        draw_btn(2, 0, S_IC_STOP, "STOP", "SQ");
-    } else {
-        draw_btn(0, 0, S_IC_REW, "REWIND", "L");
-        draw_btn(1, 1, S_IC_PLAY, "NEXT", "X O TRI SQ");
-        draw_btn(2, 0, S_IC_BACK, "BACK", "SEL+O");
+    /* слоговый режим: два длинных ряда кнопок */
+    if (sy) {
+        draw_btnw(0, 0, S_IC_REW, "REWIND", "L");
+        draw_btnw(1, 1, S_IC_PLAY, "NEXT SYLLABLE", "X O TRI SQ");
     }
 
     /* ползунки */
@@ -1022,45 +1101,45 @@ static void ui_draw(void) {
         else ftx(f_ui, x + w + 16, cy + 5, COL_INK, 15, t);
     }
 
-    /* чипы */
-    static const char *stn[6] = {"DEFAULT", "M3", "M6", "F2", "F4", "CROAK"};
-    static const char *syn[6] = {"QUANT", "1/4", "1/8", "1/8T", "1/16", "AUTO"};
-    static const int CH_OFF[6] = {S_CHIP0_OFF, S_CHIP1_OFF, S_CHIP2_OFF, S_CHIP3_OFF, S_CHIP4_OFF, S_CHIP5_OFF};
-    static const int CH_ON[6] = {S_CHIP0_ON, S_CHIP1_ON, S_CHIP2_ON, S_CHIP3_ON, S_CHIP4_ON, S_CHIP5_ON};
-    for (int i = 0; i < 6; i++) {
-        int on = !sy ? (style == i) : (i == 0 ? quant : (i <= 4 ? subdiv == i : auto_run));
-        int x = 380 + (i % 2) * 110, y = 300 + (i / 2) * 36;
-        spr(on ? CH_ON[i] : CH_OFF[i], x, y);
-        ftc(f_ui, x + 51, y + 20 + (on ? 1 : 0), COL_INK, 14, sy ? syn[i] : stn[i]);
+    /* чипы слогового режима: FULL, TAP и сетка */
+    if (sy) {
+        static const char *syn[6] = {"FULL", "TAP TEMPO", "1/4", "1/8", "1/8T", "1/16"};
+        static const int CH_OFF[6] = {S_CHIP0_OFF, S_CHIP1_OFF, S_CHIP2_OFF, S_CHIP3_OFF, S_CHIP4_OFF, S_CHIP5_OFF};
+        static const int CH_ON[6] = {S_CHIP0_ON, S_CHIP1_ON, S_CHIP2_ON, S_CHIP3_ON, S_CHIP4_ON, S_CHIP5_ON};
+        for (int i = 0; i < 6; i++) {
+            int x = 380 + (i % 2) * 110, y = 300 + (i / 2) * 36;
+            int on = (i == 0) ? fullsyl : (i == 1 ? inr(x, y, 102, 30) : subdiv == i - 1);
+            spr(on ? CH_ON[i] : CH_OFF[i], x, y);
+            ftc(f_ui, x + 51, y + 20 + (on ? 1 : 0), COL_INK, 14, syn[i]);
+        }
     }
 
     /* главная кнопка */
     {
         int p = inr(BIG_X, BIG_Y, 330, 100);
-        spr(speaking ? S_BIG_ORANGE : (p ? S_BIG_YELLOW_P : S_BIG_YELLOW), BIG_X, BIG_Y);
-        spr(S_IC_PLAY_BIG, BIG_X + 30, BIG_Y + 22 + p);
-        const char *bl = speaking ? "SPEAKING..." : (sy ? "NEW PHRASE" : (hn ? "TYPE & SPEAK" : "TYPE TEXT"));
-        ftx(f_ui, BIG_X + 100, BIG_Y + 62 + p, COL_INK, 30, bl);
-        ftr(f_ui, BIG_X + 310, BIG_Y + 90, COL_DIM, 12, "X");
+        int orange = sy ? auto_run : speaking;
+        spr(orange ? S_BIG_ORANGE : (p ? S_BIG_YELLOW_P : S_BIG_YELLOW), BIG_X, BIG_Y);
+        spr(speaking && !sy ? S_IC_STOP_BIG : S_IC_PLAY_BIG, BIG_X + 30, BIG_Y + 22 + p);
+        const char *bl = sy ? (auto_run ? "STOP AUTO" : "AUTOPLAY") : (speaking ? "STOP" : (hn ? "SPEAK" : "TYPE TEXT"));
+        ftx(f_ui, BIG_X + 100, BIG_Y + 62 + p, COL_INK, 34, bl);
     }
 
     /* нижняя панель: громкость и состояние */
     {
-        const Voice *v = active_voice();
-        ftx(f_ui, 370, 488, COL_INK, 14, v ? v->label : "eSpeak JA");
+        ftx(f_ui, 370, 488, COL_INK, 14, (hn && detect(hist[sel]) == 2) ? "eSpeak JA" : (nev ? ev[cur].label : "-"));
         if (sy) snprintf(t, sizeof t, "syllable %d / %d    %s", g_sy_last + 1, nsyl, g_sy_ready ? "" : "rendering...");
 #ifdef HAVE_RHVOICE
-        else if (g_ready && !rh_ok) snprintf(t, sizeof t, "RHVoice: not loaded");
+        else if (g_ready && !rh_ok && ev[cur].eng == 5) snprintf(t, sizeof t, "RHVoice: not loaded");
 #endif
         else if (g_audio_ms > 0) snprintf(t, sizeof t, "synth %d ms / audio %d ms (x%.2f)", g_synth_ms, g_audio_ms, (float)g_synth_ms / g_audio_ms);
-        else snprintf(t, sizeof t, "Select+Start: exit");
+        else snprintf(t, sizeof t, "tap the screen to type");
         ftx(f_ui, 370, 510, COL_DIM, 12, t);
     }
 
     /* голоса */
     for (int i = 0; i < nev && i < 7; i++) {
         int y = VOI_Y + i * 30;
-        int on = (ev[i].lang ? cur_ru : cur_en) == i;
+        int on = (cur == i);
         if (on) spr(S_ROWSEL, 624, y);
         int e = ev[i].eng, d = e == 0 ? 0 : (e == 1 ? 1 : (e == 3 ? 2 : 3));
         static const int DOT[4] = {S_DOT0, S_DOT1, S_DOT2, S_DOT3};
@@ -1150,11 +1229,7 @@ int main(void) {
 #ifdef HAVE_ESPEAK
     ev[nev++] = (Voice){"eSpeak RU (retro)", 1, 1, 1, NULL};
 #endif
-    for (int i = 0; i < nev; i++) {            /* выбор по умолчанию: первый голос каждого языка */
-        if (ev[i].lang == 0 && cur_en < 0) cur_en = i;
-        if (ev[i].lang == 1 && cur_ru < 0) cur_ru = i;
-    }
-    cur = cur_en >= 0 ? cur_en : 0;
+    cur = 0;
     hist_load();
 
     SceUID ath = sceKernelCreateThread("aud", audio_thread, 96, 0x10000, 0, 0x40000, NULL);
@@ -1221,17 +1296,17 @@ int main(void) {
                 if (selh) { pitch += d * 10; if (pitch < 50) pitch = 50; if (pitch > 200) pitch = 200; sy_render(); }
                 else { int nb = bpm + d; if (nb < 40) nb = 40; if (nb > 240) nb = 240; bpm = nb; }
             }
-            if (selh && (pr & SCE_CTRL_SQUARE)) quant = !quant;
+            if (selh && (pr & SCE_CTRL_SQUARE)) fullsyl = !fullsyl;       /* Select+Квадрат: слоги до конца */
             if (selh && (pr & SCE_CTRL_TRIANGLE)) subdiv = subdiv >= 4 ? 1 : subdiv + 1;
             if (selh && (pr & SCE_CTRL_CROSS)) { do_new = 1; single = 1; }
         } else {
             /* ---- обычный режим ---- */
             if (pr & SCE_CTRL_START) break;
             if (pr & SCE_CTRL_LTRIGGER) {
-                if (selh) style = (style + NSTYLE - 1) % NSTYLE; else { cur = (cur + nev - 1) % nev; if (ev[cur].lang) cur_ru = cur; else cur_en = cur; }
+                if (!selh && nev) cur = (cur + nev - 1) % nev;
             }
             if (pr & SCE_CTRL_RTRIGGER) {
-                if (selh) style = (style + 1) % NSTYLE; else { cur = (cur + 1) % nev; if (ev[cur].lang) cur_ru = cur; else cur_en = cur; }
+                if (!selh && nev) cur = (cur + 1) % nev;
             }
             if (pr & (SCE_CTRL_UP | SCE_CTRL_DOWN)) {
                 if (selh) {
@@ -1259,6 +1334,7 @@ int main(void) {
                 hist_add(buf);
                 if (g_sylmode) speak_ex(buf, 1); else speak(buf);
             }
+            g_reopen = 1;                                   /* системный диалог мог забрать звук */
             sceCtrlPeekBufferPositive(0, &pad, 1);
             old = pad.buttons;
             tprev = 1; u_drag = -1; u_down = 0; u_press = 0;

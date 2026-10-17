@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     ev[nev++] = (Voice){"RHVoice Aleksandr (RU)", 5, 0, 1, "Aleksandr-hq"};
     ev[nev++] = (Voice){"RHVoice Anna (RU)", 5, 1, 1, "Anna"};
     ev[nev++] = (Voice){"eSpeak RU (retro)", 1, 1, 1, NULL};
-    cur_en = 0; cur_ru = 4; cur = 0;
+    cur = 0;
     snprintf(hist[0], HL, "Hello, this is VITA. Experimental speech for electronic music.");
     snprintf(hist[1], HL, "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82, \xD1\x8D\xD1\x82\xD0\xBE \xD0\x92\xD0\xB8\xD1\x82\xD0\xB0. \xD0\xAD\xD0\xBA\xD1\x81\xD0\xBF\xD0\xB5\xD1\x80\xD0\xB8\xD0\xBC\xD0\xB5\xD0\xBD\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C\xD0\xBD\xD0\xB0\xD1\x8F \xD1\x80\xD0\xB5\xD1\x87\xD1\x8C.");
     snprintf(hist[2], HL, "Kraftwerk style: we are the robots, we are the robots, we are the robots");
@@ -122,13 +122,13 @@ int main(int argc, char **argv) {
     hn = 5; sel = 0;
     g_ready = 1; g_synth_ms = 480; g_audio_ms = 2300;
     ui_load();
-    if (!strcmp(sc, "ru")) { sel = 1; cur = 4; }
+    if (!strcmp(sc, "ru")) { sel = 0; cur = 4; }
     if (!strcmp(sc, "long")) { sel = 2; for (int i = 0; i < 6; i++) strcat(hist[2], " and again we are the robots"); }
     if (!strcmp(sc, "empty")) { hn = 0; }
     if (!strcmp(sc, "press")) { u_down = 1; u_tx = 400; u_ty = 400; }
-    if (!strcmp(sc, "speak")) { g_busy = 1; speed = 130; pitch = 80; style = 2; }
+    if (!strcmp(sc, "speak")) { g_busy = 1; speed = 130; pitch = 80; }
     if (!strncmp(sc, "syl", 3)) {
-        g_sylmode = 1; g_sy_ready = 1; nsyl = 9; sy_idx = 4; g_sy_last = 3; quant = 1; subdiv = 2; bpm = 124;
+        g_sylmode = 1; g_sy_ready = 1; nsyl = 9; sy_idx = 4; g_sy_last = 3; fullsyl = 1; subdiv = 2; bpm = 124; auto_run = (strcmp(sc, "syl_auto") == 0);
         if (!strcmp(sc, "syl_wait")) g_sy_ready = 0;
     }
     ui_draw();
