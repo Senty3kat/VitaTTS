@@ -296,4 +296,6 @@ jobs:
           tag_name: v${{ steps.ver.outputs.ver }}
           name: ${{ steps.ver.outputs.name }}
           prerelease: true
+          target_commitish: ${{ github.sha }}
+          overwrite_files: true
           files: ${{ steps.ver.outputs.file }}
