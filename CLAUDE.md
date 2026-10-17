@@ -72,6 +72,7 @@
 
 ## Известные проблемы и сборка
 
+- Иконка `sce_sys/icon0.png` должна быть PNG **с палитрой** (8 бит, режим P). RGBA-иконка даёт в VitaShell ошибку установки 0x8010113D.
 - `vita-elf-create: Cannot allocate ... segment 1 overlaps` — код кончается у границы страницы; лечится подкладкой размера (`.space N`
   в `text_pad`, как в VitaSampler), если вернётся.
 - В workflow пакет называется `libvita2d` (не `vita2d`), у pacman нужен `--noconfirm`. У VitaSampler сборка быстрее: он собирается в готовом

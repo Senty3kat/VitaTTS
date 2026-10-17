@@ -527,7 +527,11 @@ def main():
     atlas, pos = pack(items)
     atlas.save(os.path.join(ROOT, "assets", "atlas.png"), optimize=True)
     ic = app_icon()
-    ic.save(os.path.join(ROOT, "assets", "icon0.png"), optimize=True)
+    # LiveArea принимает только PNG с палитрой (8 бит), иначе VitaShell: ошибка 0x8010113D при установке
+    flat = Image.new("RGBA", ic.size, (214, 204, 178, 255))
+    flat.alpha_composite(ic)
+    flat.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).save(
+        os.path.join(ROOT, "assets", "icon0.png"), optimize=True)
     ic.save(os.path.join(ROOT, "design", "icon0.png"))
     for name, (img, pad) in SPR.items():
         img.save(os.path.join(ROOT, "design", "parts", name + ".png"))

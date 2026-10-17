@@ -869,7 +869,7 @@ static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
 #define LCD_W 560
 #define LCD_H_MAIN 180
 #define LCD_H_SYL 130
-#define APP_VER "v2.20"
+#define APP_VER "v2.21"
 #define PILL_X 456
 #define PILL_Y 16
 #define ROW_Y 224
