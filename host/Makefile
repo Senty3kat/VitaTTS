@@ -11,3 +11,8 @@ check:
 check-all: check
 	gcc -fsyntax-only $(STRICT) $(CFLAGS) -DHAVE_SAM ../main.c
 	gcc -fsyntax-only $(STRICT) $(CFLAGS) -DHAVE_SAM -DHAVE_RHVOICE ../main.c
+
+# превью экрана с настоящими PNG и шрифтами: make preview  ->  /tmp/shots/*.png
+preview: preview.c ../main.c $(wildcard stub/*.h stub/*/*.h)
+	gcc -std=gnu11 -D_GNU_SOURCE -Istub $(shell pkg-config --cflags freetype2) -g -O1 -w preview.c -o preview.bin -lm -lpng $(shell pkg-config --libs freetype2) -Wl,--unresolved-symbols=ignore-all
+	python3 shot.py

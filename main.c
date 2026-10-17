@@ -695,12 +695,394 @@ static void set_sylmode(int on) {
 }
 
 /* ---------------- интерфейс ---------------- */
-static vita2d_pvf *font;
+/* Экран «+VITA»: фон и спрайты — PNG из tools/gen_assets.py (assets, ui_atlas.h), текст рисуется поверх шрифтами TTF.
+ * Левая половина зависит от режима (обычный / слоговый), правая (голоса, история) одна и та же. */
+#include "ui_atlas.h"
+#ifndef ASSET_PREFIX
+#define ASSET_PREFIX "app0:assets/"
+#endif
+#ifndef FONT_PREFIX
+#define FONT_PREFIX "app0:fonts/"
+#endif
 
-static void T(int x, int y, unsigned c, float s, const char *fmt, ...) {
-    char b[700];
-    va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
-    vita2d_pvf_draw_text(font, x, y, c, s, b);
+static vita2d_pvf *font;                      /* системный шрифт: запасной для японской каны */
+static vita2d_font *f_ui, *f_lcd;             /* DejaVu Condensed Bold (кириллица) и DejaVu Mono Bold */
+static vita2d_texture *g_atlas, *g_body[2];
+
+#define COL_BG   RGBA8(235, 227, 205, 255)
+#define COL_INK  RGBA8(58, 46, 32, 255)
+#define COL_DIM  RGBA8(120, 108, 88, 255)
+#define COL_LCD  RGBA8(54, 38, 10, 255)
+#define COL_RED  RGBA8(200, 50, 40, 255)
+
+static void ui_load(void) {
+    g_atlas = vita2d_load_PNG_file(ASSET_PREFIX "atlas.png");
+    g_body[0] = vita2d_load_PNG_file(ASSET_PREFIX "body_main.png");
+    g_body[1] = vita2d_load_PNG_file(ASSET_PREFIX "body_syl.png");
+    f_ui = vita2d_load_font_file(FONT_PREFIX "cond.ttf");
+    f_lcd = vita2d_load_font_file(FONT_PREFIX "mono.ttf");
+}
+
+static void spr(int id, float x, float y) {
+    const SprRect *r = &SPR_TAB[id];
+    if (g_atlas) vita2d_draw_texture_part(g_atlas, x - r->pad, y - r->pad, r->x, r->y, r->w, r->h);
+}
+
+/* текст: TTF, а для японского (нет глифов в DejaVu) — системный PVF */
+static int is_jp(const char *s) { return detect(s) == 2; }
+static void ftx(vita2d_font *f, int x, int y, unsigned c, int size, const char *s) {
+    if (f && !is_jp(s)) vita2d_font_draw_text(f, x, y, c, size, s);
+    else if (font) vita2d_pvf_draw_text(font, x, y, c, size / 16.0f, "%s", s);
+}
+static int fw(vita2d_font *f, int size, const char *s) {
+    if (f && !is_jp(s)) return vita2d_font_text_width(f, size, s);
+    return (int)(strlen(s) * size * 0.55f);
+}
+static void ftc(vita2d_font *f, int cx, int y, unsigned c, int size, const char *s) { ftx(f, cx - fw(f, size, s) / 2, y, c, size, s); }
+static void ftr(vita2d_font *f, int rx, int y, unsigned c, int size, const char *s) { ftx(f, rx - fw(f, size, s), y, c, size, s); }
+static void fit(const char *s, char *d, int dsz, vita2d_font *f, int size, int maxw) {
+    snprintf(d, dsz, "%s", s);
+    if (fw(f, size, d) <= maxw) return;
+    int n = strlen(d);
+    while (n > 1) {
+        n--;
+        while (n > 0 && (((unsigned char)d[n]) & 0xC0) == 0x80) n--;
+        d[n] = 0;
+        char t[HL + 8];
+        snprintf(t, sizeof t, "%s...", d);
+        if (fw(f, size, t) <= maxw) { snprintf(d, dsz, "%s", t); return; }
+    }
+}
+static int ncp(const char *s) {
+    int n = 0;
+    for (; *s; s++) if ((((unsigned char)*s) & 0xC0) != 0x80) n++;
+    return n;
+}
+
+/* разбиение на строки для моноширинного ЖК: колонки (кана/иероглифы — 2 колонки) */
+static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
+    int n = 0, i = 0, len = strlen(s);
+    while (i < len && n < maxl + 1) {
+        int st = i, col = 0, lastsp = -1, j = i;
+        while (j < len && s[j] != '\n') {
+            const unsigned char *p = (const unsigned char *)s + j, *q = p;
+            int cp = dec(&q), cw = (cp >= 0x2E80) ? 2 : 1, bl = (int)(q - p);
+            if (bl < 1) bl = 1;
+            if (col + cw > cap) break;
+            if (cp == ' ') lastsp = j + bl;
+            col += cw; j += bl;
+        }
+        int e = j;
+        if (j < len && s[j] != '\n' && lastsp > st) e = lastsp;
+        int l = e - st;
+        while (l > 0 && s[st + l - 1] == ' ') l--;
+        ls[n] = st; ll[n] = l; n++;
+        i = e;
+        if (i < len && s[i] == '\n') i++;
+        while (i < len && s[i] == ' ') i++;
+    }
+    return n;
+}
+
+/* ---------- геометрия (должна совпадать с tools/gen_assets.py) ---------- */
+#define LCD_X 26
+#define LCD_Y 74
+#define LCD_W 560
+#define LCD_H 130
+#define PILL_X 456
+#define PILL_Y 16
+#define ROW_Y 224
+#define BIG_X 16
+#define BIG_Y 424
+#define VOI_Y 94
+#define HIS_Y 350
+
+enum { SL_SPEED, SL_PITCH, SL_VOL, SL_BPM, SL_SENS, SL_N };
+static const int SL_MIN[SL_N] = {50, 50, 20, 40, 5}, SL_MAX[SL_N] = {250, 200, 250, 240, 45}, SL_STEP[SL_N] = {5, 5, 5, 1, 1};
+
+static int sl_geo(int id, int *x, int *cy, int *w) {
+    int sy = g_sylmode;
+    *x = 108; *w = 190;
+    switch (id) {
+    case SL_SPEED: if (sy) return 0; *cy = 318; return 1;
+    case SL_PITCH: *cy = sy ? 342 : 366; return 1;
+    case SL_BPM: if (!sy) return 0; *cy = 304; return 1;
+    case SL_SENS: if (!sy) return 0; *cy = 380; return 1;
+    default: *x = 410; *w = 128; *cy = 446; return 1;
+    }
+}
+static int sl_get(int id) {
+    switch (id) { case SL_SPEED: return speed; case SL_PITCH: return pitch; case SL_VOL: return volume; case SL_BPM: return bpm; default: return sens; }
+}
+static void sl_set(int id, int v) {
+    if (v < SL_MIN[id]) v = SL_MIN[id];
+    if (v > SL_MAX[id]) v = SL_MAX[id];
+    switch (id) {
+    case SL_SPEED: speed = v; break;
+    case SL_PITCH: pitch = v; break;
+    case SL_VOL: volume = v; gain = volume / 100.0f; break;
+    case SL_BPM: bpm = v; break;
+    default: sens = v; break;
+    }
+}
+
+/* ---------- касания ---------- */
+static int u_down, u_press, u_rel, u_tx, u_ty, u_drag = -1, u_dirty;
+static int inr(int x, int y, int w, int h) { return u_down && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
+static int tapr(int x, int y, int w, int h) { return u_press && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
+
+static void select_voice(int i) {
+    cur = i;
+    if (ev[i].lang) cur_ru = i; else cur_en = i;
+}
+
+static void ui_events(int *do_new, int *do_edit) {
+    int sy = g_sylmode;
+    if (u_press) {
+        u_drag = -1; u_dirty = 0;
+        for (int id = 0; id < SL_N; id++) {
+            int x, cy, w;
+            if (!sl_geo(id, &x, &cy, &w)) continue;
+            if (u_tx >= x - 16 && u_tx <= x + w + 16 && abs(u_ty - cy) <= 20) { u_drag = id; break; }
+        }
+        if (u_drag < 0) {
+            if (tapr(PILL_X, PILL_Y, 140, 36)) set_sylmode(!sy);
+            else if (tapr(LCD_X, LCD_Y, LCD_W, LCD_H)) { if (sy || !hn) *do_new = 1; else *do_edit = 1; }
+            else if (tapr(BIG_X, BIG_Y, 330, 100)) *do_new = 1;
+            for (int i = 0; i < 3; i++) {
+                if (!tapr(16 + i * 196, ROW_Y, 188, 44)) continue;
+                if (!sy) {
+                    if (i == 0 && hn) speak(hist[sel]);
+                    else if (i == 1 && hn) *do_edit = 1;
+                    else if (i == 2) { g_abort = 1; g_flush = 1; }
+                } else {
+                    if (i == 0) { sy_idx = 0; trig_pending = 0; }
+                    else if (i == 1) trig_pending = 1;
+                    else set_sylmode(0);
+                }
+            }
+            for (int i = 0; i < 6; i++) {
+                if (!tapr(380 + (i % 2) * 110, 300 + (i / 2) * 36, 102, 30)) continue;
+                if (!sy) style = i;
+                else if (i == 0) quant = !quant;
+                else if (i <= 4) subdiv = i;
+                else { auto_run = !auto_run; trig_pending = 0; if (auto_run) g_resync = 1; }
+            }
+            for (int i = 0; i < nev && i < 7; i++) {
+                if (!tapr(624, VOI_Y + i * 30, 308, 28)) continue;
+                select_voice(i);
+                if (!sy) speak(ev[i].lang ? "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82, \xD1\x8D\xD1\x82\xD0\xBE \xD0\x92\xD0\xB8\xD1\x82\xD0\xB0." : "Hello, this is VITA.");
+                else if (hn && detect(hist[sel]) == ev[i].lang) sy_render();
+            }
+            for (int i = 0; i < hn; i++) {
+                if (!tapr(624, HIS_Y + i * 32, 308, 30)) continue;
+                sel = i;
+                if (sy) sy_render(); else speak(hist[sel]);
+            }
+        }
+    }
+    if (u_drag >= 0 && u_down) {
+        int x, cy, w;
+        if (sl_geo(u_drag, &x, &cy, &w)) {
+            float t = (u_tx - x) / (float)w;
+            if (t < 0) t = 0;
+            if (t > 1) t = 1;
+            int mn = SL_MIN[u_drag], st = SL_STEP[u_drag];
+            int v = mn + (int)(t * (SL_MAX[u_drag] - mn) + 0.5f);
+            v = mn + ((v - mn + st / 2) / st) * st;
+            if (v != sl_get(u_drag)) { sl_set(u_drag, v); u_dirty = 1; }
+        }
+    }
+    if (u_rel && u_drag >= 0) {
+        if (u_dirty) {
+            if (sy && u_drag == SL_PITCH) sy_render();
+            else if (u_drag == SL_SENS) sy_reanalyze();
+        }
+        u_drag = -1; u_dirty = 0;
+    }
+}
+
+/* ---------- рисование ---------- */
+static const Voice *active_voice(void) {
+    int lang = hn ? detect(hist[sel]) : 0;
+    if (lang == 1) return cur_ru >= 0 ? &ev[cur_ru] : NULL;
+    if (lang == 2) return NULL;
+    return cur_en >= 0 ? &ev[cur_en] : (nev ? &ev[cur] : NULL);
+}
+
+static void draw_btn(int i, int style, int icon, const char *label, const char *hint) {
+    int x = 16 + i * 196, y = ROW_Y, p = inr(x, y, 188, 44);
+    static const int ids[2][2] = {{S_BTN_CREAM, S_BTN_CREAM_P}, {S_BTN_YELLOW, S_BTN_YELLOW_P}};
+    spr(ids[style][p], x, y);
+    spr(icon, x + 14, y + 8 + p);
+    ftx(f_ui, x + 50, y + 29 + p, COL_INK, 16, label);
+    ftr(f_ui, x + 176, y + 28 + p, COL_DIM, 11, hint);
+}
+
+static void draw_lcd(void) {
+    char t[64];
+    int sy = g_sylmode;
+    if (!sy) {
+        if (hn) { snprintf(t, sizeof t, "%d/%d", ncp(hist[sel]), IMEMAX); ftr(f_lcd, LCD_X + LCD_W - 12, LCD_Y + 18, COL_LCD, 12, t); }
+        if (!hn) { ftc(f_ui, LCD_X + LCD_W / 2, LCD_Y + 76, RGBA8(54, 38, 10, 150), 20, "TAP HERE OR PRESS X TO TYPE A PHRASE"); return; }
+        static const int SIZES[] = {24, 20, 17, 14, 12};
+        int ls[8], ll[8], k, n = 0, maxl = 3, cap, sz = 12;
+        for (k = 0; k < 5; k++) {
+            sz = SIZES[k];
+            maxl = (int)(92.0f / (sz * 1.22f));
+            if (maxl > 7) maxl = 7;
+            cap = (int)((LCD_W - 28) / (sz * 0.602f));
+            n = lcd_wrap(hist[sel], cap, maxl, ls, ll);
+            if (n <= maxl) break;
+        }
+        cap = (int)((LCD_W - 28) / (sz * 0.602f));
+        for (int i = 0; i < n && i < maxl; i++) {
+            char b[HL];
+            int l = ll[i];
+            memcpy(b, hist[sel] + ls[i], l); b[l] = 0;
+            if (i == maxl - 1 && n > maxl) { char c2[HL]; clip(b, c2, cap > 4 ? cap - 3 : 1); snprintf(b, sizeof b, "%s", c2); }
+            ftx(f_lcd, LCD_X + 14, LCD_Y + 40 + (int)(i * sz * 1.22f) + (int)(sz * 0.55f), COL_LCD, sz, b);
+        }
+        return;
+    }
+    /* слоговый режим: фраза мелко и полоса слогов */
+    if (hn) {
+        int ls[3], ll[3];
+        int n = lcd_wrap(hist[sel], 63, 2, ls, ll);
+        for (int i = 0; i < n && i < 2; i++) {
+            char b[HL];
+            memcpy(b, hist[sel] + ls[i], ll[i]); b[ll[i]] = 0;
+            ftx(f_lcd, LCD_X + 14, LCD_Y + 42 + i * 17, COL_LCD, 14, b);
+        }
+    }
+    int sx = LCD_X + 14, sw = LCD_W - 28, y = LCD_Y + 78, h = 40;
+    int nn = nsyl;
+    if (!g_sy_ready || nn <= 0) {
+        ftc(f_ui, LCD_X + LCD_W / 2, y + 27, RGBA8(54, 38, 10, 170), 17, g_sy_ready ? "NO SYLLABLES - LOWER SENS" : "RENDERING PHRASE...");
+        return;
+    }
+    float w = (sw - 2.0f * (nn - 1)) / nn;
+    for (int i = 0; i < nn; i++) {
+        float x = sx + i * (w + 2.0f);
+        if (i == g_sy_last) vita2d_draw_rectangle(x, y, w, h, COL_LCD);
+        else if (i == sy_idx) {
+            vita2d_draw_rectangle(x, y, w, h, COL_LCD);
+            vita2d_draw_rectangle(x + 3, y + 3, w - 6 > 1 ? w - 6 : 1, h - 6, RGBA8(236, 196, 40, 255));
+            vita2d_draw_rectangle(x + 3, y + h - 12, w - 6 > 1 ? w - 6 : 1, 9, RGBA8(54, 38, 10, 120));
+        } else vita2d_draw_rectangle(x, y, w, h, RGBA8(200, 150, 22, 255));
+    }
+}
+
+static void ui_draw(void) {
+    char t[160], t2[160];
+    int sy = g_sylmode;
+    vita2d_texture *bt = g_body[sy ? 1 : 0];
+    if (bt) vita2d_draw_texture(bt, 0, 0);
+    else vita2d_draw_rectangle(0, 0, 960, 544, COL_BG);
+
+    /* верхняя полоса: состояние, кнопка слогового режима */
+    int speaking = g_busy || g_play;
+    spr(!g_ready ? S_LED_RED : (speaking ? S_LED_ORANGE : S_LED_GREEN), 632, 26);
+    ftx(f_ui, 658, 40, COL_INK, 17, !g_ready ? "LOADING" : (speaking ? "SPEAKING" : "READY"));
+    ftr(f_ui, 936, 40, COL_DIM, 12, "v2.1");
+    if (sy && (quant || auto_run)) {
+        unsigned long long now = sceKernelGetProcessTimeWide();
+        spr(now - g_tick_t < 90000ULL ? S_LED_ORANGE : S_LED_OFF, 840, 26);
+    }
+    {
+        int p = inr(PILL_X, PILL_Y, 140, 36);
+        spr(sy ? (p ? S_PILL_ORANGE_P : S_PILL_ORANGE) : (p ? S_PILL_CREAM_P : S_PILL_CREAM), PILL_X, PILL_Y);
+        spr(S_IC_SYL, PILL_X + 10, PILL_Y + 4 + p);
+        ftx(f_ui, PILL_X + 44, PILL_Y + 24 + p, COL_INK, 14, "SYLLABLE");
+    }
+
+    draw_lcd();
+
+    /* ряд кнопок */
+    if (!sy) {
+        draw_btn(0, 0, S_IC_REPEAT, "REPEAT", "O");
+        draw_btn(1, 0, S_IC_EDIT, "EDIT", "TRI");
+        draw_btn(2, 0, S_IC_STOP, "STOP", "SQ");
+    } else {
+        draw_btn(0, 0, S_IC_REW, "REWIND", "L");
+        draw_btn(1, 1, S_IC_PLAY, "NEXT", "X O TRI SQ");
+        draw_btn(2, 0, S_IC_BACK, "BACK", "SEL+O");
+    }
+
+    /* ползунки */
+    static const char *vfmt[SL_N] = {"%d%%", "%d%%", "%d%%", "%d", "%d"};
+    for (int id = 0; id < SL_N; id++) {
+        int x, cy, w;
+        if (!sl_geo(id, &x, &cy, &w)) continue;
+        float tt = (sl_get(id) - SL_MIN[id]) / (float)(SL_MAX[id] - SL_MIN[id]);
+        if (tt > 0) vita2d_draw_rectangle(x, cy - 3, tt * w, 6, RGBA8(244, 126, 44, 255));
+        spr(u_drag == id ? S_THUMB_P : S_THUMB, x + tt * w - 15, cy - 15);
+        snprintf(t, sizeof t, vfmt[id], sl_get(id));
+        if (id == SL_VOL) ftx(f_ui, x + w + 12, cy + 5, COL_INK, 14, t);
+        else ftx(f_ui, x + w + 16, cy + 5, COL_INK, 15, t);
+    }
+
+    /* чипы */
+    static const char *stn[6] = {"DEFAULT", "M3", "M6", "F2", "F4", "CROAK"};
+    static const char *syn[6] = {"QUANT", "1/4", "1/8", "1/8T", "1/16", "AUTO"};
+    static const int CH_OFF[6] = {S_CHIP0_OFF, S_CHIP1_OFF, S_CHIP2_OFF, S_CHIP3_OFF, S_CHIP4_OFF, S_CHIP5_OFF};
+    static const int CH_ON[6] = {S_CHIP0_ON, S_CHIP1_ON, S_CHIP2_ON, S_CHIP3_ON, S_CHIP4_ON, S_CHIP5_ON};
+    for (int i = 0; i < 6; i++) {
+        int on = !sy ? (style == i) : (i == 0 ? quant : (i <= 4 ? subdiv == i : auto_run));
+        int x = 380 + (i % 2) * 110, y = 300 + (i / 2) * 36;
+        spr(on ? CH_ON[i] : CH_OFF[i], x, y);
+        ftc(f_ui, x + 51, y + 20 + (on ? 1 : 0), COL_INK, 14, sy ? syn[i] : stn[i]);
+    }
+
+    /* главная кнопка */
+    {
+        int p = inr(BIG_X, BIG_Y, 330, 100);
+        spr(speaking ? S_BIG_ORANGE : (p ? S_BIG_YELLOW_P : S_BIG_YELLOW), BIG_X, BIG_Y);
+        spr(S_IC_PLAY_BIG, BIG_X + 30, BIG_Y + 22 + p);
+        const char *bl = speaking ? "SPEAKING..." : (sy ? "NEW PHRASE" : (hn ? "TYPE & SPEAK" : "TYPE TEXT"));
+        ftx(f_ui, BIG_X + 100, BIG_Y + 62 + p, COL_INK, 30, bl);
+        ftr(f_ui, BIG_X + 310, BIG_Y + 90, COL_DIM, 12, "X");
+    }
+
+    /* нижняя панель: громкость и состояние */
+    {
+        const Voice *v = active_voice();
+        ftx(f_ui, 370, 488, COL_INK, 14, v ? v->label : "eSpeak JA");
+        if (sy) snprintf(t, sizeof t, "syllable %d / %d    %s", g_sy_last + 1, nsyl, g_sy_ready ? "" : "rendering...");
+#ifdef HAVE_RHVOICE
+        else if (g_ready && !rh_ok) snprintf(t, sizeof t, "RHVoice: not loaded");
+#endif
+        else if (g_audio_ms > 0) snprintf(t, sizeof t, "synth %d ms / audio %d ms (x%.2f)", g_synth_ms, g_audio_ms, (float)g_synth_ms / g_audio_ms);
+        else snprintf(t, sizeof t, "Select+Start: exit");
+        ftx(f_ui, 370, 510, COL_DIM, 12, t);
+    }
+
+    /* голоса */
+    for (int i = 0; i < nev && i < 7; i++) {
+        int y = VOI_Y + i * 30;
+        int on = (ev[i].lang ? cur_ru : cur_en) == i;
+        if (on) spr(S_ROWSEL, 624, y);
+        int e = ev[i].eng, d = e == 0 ? 0 : (e == 1 ? 1 : (e == 3 ? 2 : 3));
+        static const int DOT[4] = {S_DOT0, S_DOT1, S_DOT2, S_DOT3};
+        spr(DOT[d], 636, y + 8);
+        fit(ev[i].label, t, sizeof t, f_ui, 15, 240);
+        ftx(f_ui, 658, y + 19, COL_INK, 15, t);
+        ftr(f_ui, 920, y + 18, on ? COL_INK : COL_DIM, 12, ev[i].lang ? "RU" : "EN");
+    }
+
+    /* история (обрезанный текст кэшируется: ширину считать каждый кадр дорого) */
+    static char hc_src[HN][100], hc_out[HN][100];
+    static const int HC[5] = {S_HC0, S_HC1, S_HC2, S_HC3, S_HC4}, HCS[5] = {S_HC0_SEL, S_HC1_SEL, S_HC2_SEL, S_HC3_SEL, S_HC4_SEL};
+    for (int i = 0; i < hn; i++) {
+        int y = HIS_Y + i * 32;
+        spr(i == sel ? HCS[i] : HC[i], 624, y);
+        snprintf(t2, sizeof t2, "%d", i + 1);
+        ftx(f_ui, 637, y + 20, COL_DIM, 13, t2);
+        char src[100];
+        clip(hist[i], src, 90);
+        if (strcmp(src, hc_src[i])) { snprintf(hc_src[i], sizeof hc_src[i], "%s", src); fit(src, hc_out[i], sizeof hc_out[i], f_ui, 15, 262); }
+        ftx(f_ui, 658, y + 20, COL_INK, 15, hc_out[i]);
+    }
 }
 
 static int ime(const char *init, char *out, int outsz, int multi) {
@@ -738,25 +1120,14 @@ static int ime(const char *init, char *out, int outsz, int multi) {
     return out[0] != 0;
 }
 
-#define COL_BG   RGBA8(18, 18, 28, 255)
-#define COL_TXT  RGBA8(235, 235, 235, 255)
-#define COL_DIM  RGBA8(130, 130, 150, 255)
-#define COL_ACC  RGBA8(0, 230, 170, 255)
-#define COL_BOX  RGBA8(40, 40, 60, 255)
-#define COL_SEL  RGBA8(0, 90, 80, 255)
-
-static const char *pst(int v, char *b) {
-    if (pico_ok[v]) return "ok";
-    sprintf(b, "err%d", pico_err[v]);
-    return b;
-}
-
+#ifndef TTS_NO_MAIN
 int main(void) {
     ker_init();
     vita2d_init();
     vita2d_set_clear_color(COL_BG);
     font = vita2d_load_custom_pvf("sa0:data/font/pvf/jpn0.pvf");
     if (!font) font = vita2d_load_default_pvf();
+    ui_load();
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
@@ -810,8 +1181,10 @@ int main(void) {
         SceTouchData td;
         sceTouchPeek(SCE_TOUCH_PORT_FRONT, &td, 1);
         int tnow = td.reportNum > 0;
-        int tap = tnow && !tprev, ty = 0;
-        if (tap) ty = td.report[0].y / 2;
+        u_press = tnow && !tprev;
+        u_rel = !tnow && tprev;
+        u_down = tnow;
+        if (tnow) { u_tx = td.report[0].x / 2; u_ty = td.report[0].y / 2; }
         tprev = tnow;
 
         int do_new = 0, do_edit = 0, single = 0;
@@ -851,10 +1224,6 @@ int main(void) {
             if (selh && (pr & SCE_CTRL_SQUARE)) quant = !quant;
             if (selh && (pr & SCE_CTRL_TRIANGLE)) subdiv = subdiv >= 4 ? 1 : subdiv + 1;
             if (selh && (pr & SCE_CTRL_CROSS)) { do_new = 1; single = 1; }
-            if (tap) {
-                if (ty < 160) do_new = 1;
-                else if (ty >= 170 && (ty - 170) / 58 < hn) { sel = (ty - 170) / 58; sy_render(); }
-            }
         } else {
             /* ---- обычный режим ---- */
             if (pr & SCE_CTRL_START) break;
@@ -881,11 +1250,9 @@ int main(void) {
             if ((pr & SCE_CTRL_CIRCLE) && hn) speak(hist[sel]);
             if (pr & SCE_CTRL_CROSS) { if (selh) { do_new = 1; single = 1; } else do_new = 1; }
             if ((pr & SCE_CTRL_TRIANGLE) && hn) do_edit = 1;
-            if (tap) {
-                if (ty < 160) do_new = 1;
-                else if (ty >= 170 && (ty - 170) / 58 < hn) { sel = (ty - 170) / 58; speak(hist[sel]); }
-            }
         }
+
+        ui_events(&do_new, &do_edit);
 
         if (do_new || do_edit) {
             if (ime(do_edit ? hist[sel] : "", buf, sizeof buf, !single)) {
@@ -894,63 +1261,14 @@ int main(void) {
             }
             sceCtrlPeekBufferPositive(0, &pad, 1);
             old = pad.buttons;
-            tprev = 1;
+            tprev = 1; u_drag = -1; u_down = 0; u_press = 0;
             continue;
         }
 
         /* --- рисование --- */
         vita2d_start_drawing();
         vita2d_clear_screen();
-        T(20, 34, COL_ACC, 1.3f, "VitaTTS");
-        if (g_sylmode) {
-            static const char *gn[5] = {"", "1/4", "1/8", "1/8T", "1/16"};
-            T(180, 34, COL_ACC, 0.95f, "SYLLABLE MODE   (Select+O: back)");
-            T(20, 66, COL_TXT, 0.95f, "BPM %d   grid %s   quant %s   auto %s   syllable %d/%d",
-              bpm, gn[subdiv], quant ? "ON" : "off", auto_run ? "RUN" : "off", g_sy_last + 1, nsyl);
-            T(20, 92, COL_TXT, 0.95f, "Pitch %d%%   Volume %d%%   Sens %d   %s", pitch, volume, sens,
-              g_sy_ready ? "" : "rendering...");
-            vita2d_draw_rectangle(20, 110, 920, 46, COL_BOX);
-            int n = nsyl;
-            if (g_sy_ready && n > 0) {
-                float w = (916.0f - 2.0f * (n - 1)) / n;
-                for (int i = 0; i < n; i++) {
-                    unsigned c = (i == g_sy_last) ? COL_ACC : (i == sy_idx ? RGBA8(210, 200, 70, 255) : RGBA8(70, 70, 100, 255));
-                    vita2d_draw_rectangle(22 + i * (w + 2.0f), 114, w, 38, c);
-                }
-            } else T(34, 142, COL_DIM, 1.0f, "%s", g_sy_ready ? "no syllables found (lower Sens: Select+L)" : "rendering phrase...");
-            if (quant || auto_run) {
-                unsigned long long now = sceKernelGetProcessTimeWide();
-                if (now - g_tick_t < 90000ULL) vita2d_draw_rectangle(905, 14, 26, 26, COL_ACC);
-                else vita2d_draw_rectangle(905, 14, 26, 26, COL_BOX);
-            }
-        } else {
-            T(180, 34, COL_DIM, 0.9f, "%s", g_ready ? ((g_busy || g_play) ? "SPEAKING" : "ready") : "loading...");
-            T(20, 66, COL_TXT, 0.95f, "Voice (L/R): EN %s | RU %s   eSpeak style (Sel+L/R): %s",
-              cur_en >= 0 ? ev[cur_en].label : "-", cur_ru >= 0 ? ev[cur_ru].label : "-", stylev[style][0] ? stylev[style] : "default");
-#ifdef HAVE_RHVOICE
-            if (g_ready && !rh_ok) T(520, 34, RGBA8(230, 90, 90, 255), 0.8f, "RHVoice: not loaded");
-            else if (g_audio_ms > 0) T(520, 34, COL_DIM, 0.8f, "synth %d ms / audio %d ms (x%.2f)", g_synth_ms, g_audio_ms, (float)g_synth_ms / g_audio_ms);
-#endif
-            T(20, 92, COL_TXT, 0.95f, "Speed %d%%   Pitch %d%%   Volume %d%%", speed, pitch, volume);
-            vita2d_draw_rectangle(20, 110, 920, 46, COL_BOX);
-            T(34, 142, COL_ACC, 1.1f, "[X] / tap here: type a phrase and speak");
-        }
-        for (int i = 0; i < HN; i++) {
-            int y = 170 + i * 58;
-            vita2d_draw_rectangle(20, y, 920, 52, (i == sel && hn) ? COL_SEL : COL_BOX);
-            if (i < hn) {
-                char c[100];
-                clip(hist[i], c, 70);
-                T(32, y + 34, COL_TXT, 1.1f, "%d  %s", i + 1, c);
-            } else T(32, y + 34, COL_DIM, 1.0f, "%d  -", i + 1);
-        }
-        if (g_sylmode) {
-            T(20, 504, COL_DIM, 0.72f, "X/O/Sq/Tri or REAR TOUCH: next syllable   L rewind  R new  Up/Down phrase  Left/Right BPM  START auto-run");
-            T(20, 526, COL_DIM, 0.72f, "Select+: Left/Right pitch  Up/Down vol  L/R sens  Square quant  Triangle grid  X one-line  Start exit");
-        } else {
-            T(20, 504, COL_DIM, 0.72f, "X new (finish with O)  O repeat  Triangle edit  Square stop  Up/Down history  Left/Right speed  L/R voice");
-            T(20, 526, COL_DIM, 0.72f, "Select+: Left/Right pitch  Up/Down volume  L/R eSpeak style  X one-line  O syllable mode      START exit");
-        }
+        ui_draw();
         vita2d_end_drawing();
         vita2d_swap_buffers();
     }
@@ -960,3 +1278,5 @@ int main(void) {
     sceKernelExitProcess(0);
     return 0;
 }
+
+#endif
