@@ -3,6 +3,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   host-check:
     # быстрая проверка main.c на обычном Linux с заглушками SDK (host/stub), без установки VitaSDK
@@ -275,7 +278,22 @@ jobs:
           path: log_*.txt
           if-no-files-found: ignore
 
+      - name: Имя VPK с версией
+        id: ver
+        run: |
+          V=$(sed -n 's/.*set(VITA_VERSION *"\([0-9.]*\)").*/\1/p' CMakeLists.txt | head -1 | sed 's/^0*\([0-9]\)/\1/')
+          N=$(basename "$(ls build/*.vpk | head -1)" .vpk)
+          cp "build/$N.vpk" "build/$N-v$V.vpk"
+          echo "ver=$V" >> "$GITHUB_OUTPUT"
+          echo "name=$N-v$V" >> "$GITHUB_OUTPUT"
+          echo "file=build/$N-v$V.vpk" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: VitaTTS-vpk
-          path: build/VitaTTS.vpk
+          name: ${{ steps.ver.outputs.name }}
+          path: ${{ steps.ver.outputs.file }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.ver }}
+          name: ${{ steps.ver.outputs.name }}
+          prerelease: true
+          files: ${{ steps.ver.outputs.file }}

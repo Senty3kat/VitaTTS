@@ -70,7 +70,7 @@ void vita2d_swap_buffers(void) {}
 void vita2d_wait_rendering_done(void) {}
 vita2d_pvf *vita2d_load_default_pvf(void) { return NULL; }
 vita2d_pvf *vita2d_load_custom_pvf(const char *p) { (void)p; return NULL; }
-int vita2d_pvf_draw_text(vita2d_pvf *f, int x, int y, unsigned int c, float s, const char *t, ...) { (void)f; (void)x; (void)y; (void)c; (void)s; (void)t; return 0; }
+int vita2d_pvf_draw_text(vita2d_pvf *f, int x, int y, unsigned int c, float s, const char *t) { (void)f; (void)x; (void)y; (void)c; (void)s; (void)t; return 0; }
 uint64_t sceKernelGetProcessTimeWide(void) { return 0; }
 
 vita2d_font *vita2d_load_font_file(const char *fn) {

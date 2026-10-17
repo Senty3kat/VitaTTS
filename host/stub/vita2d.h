@@ -35,5 +35,5 @@ int vita2d_font_text_width(vita2d_font *font, unsigned int size, const char *tex
 vita2d_pvf *vita2d_load_default_pvf(void);
 vita2d_pvf *vita2d_load_custom_pvf(const char *path);
 void vita2d_free_pvf(vita2d_pvf *font);
-int vita2d_pvf_draw_text(vita2d_pvf *font, int x, int y, unsigned int color, float scale, const char *text, ...);
+int vita2d_pvf_draw_text(vita2d_pvf *font, int x, int y, unsigned int color, float scale, const char *text);
 vita2d_texture *vita2d_load_PNG_file(const char *filename);

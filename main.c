@@ -732,7 +732,7 @@ static void spr(int id, float x, float y) {
 static int is_jp(const char *s) { return detect(s) == 2; }
 static void ftx(vita2d_font *f, int x, int y, unsigned c, int size, const char *s) {
     if (f && !is_jp(s)) vita2d_font_draw_text(f, x, y, c, size, s);
-    else if (font) vita2d_pvf_draw_text(font, x, y, c, size / 16.0f, "%s", s);
+    else if (font) vita2d_pvf_draw_text(font, x, y, c, size / 16.0f, s);
 }
 static int fw(vita2d_font *f, int size, const char *s) {
     if (f && !is_jp(s)) return vita2d_font_text_width(f, size, s);
@@ -984,7 +984,7 @@ static void ui_draw(void) {
     int speaking = g_busy || g_play;
     spr(!g_ready ? S_LED_RED : (speaking ? S_LED_ORANGE : S_LED_GREEN), 632, 26);
     ftx(f_ui, 658, 40, COL_INK, 17, !g_ready ? "LOADING" : (speaking ? "SPEAKING" : "READY"));
-    ftr(f_ui, 936, 40, COL_DIM, 12, "v2.1");
+    ftr(f_ui, 936, 40, COL_DIM, 12, "v2.10");
     if (sy && (quant || auto_run)) {
         unsigned long long now = sceKernelGetProcessTimeWide();
         spr(now - g_tick_t < 90000ULL ? S_LED_ORANGE : S_LED_OFF, 840, 26);
