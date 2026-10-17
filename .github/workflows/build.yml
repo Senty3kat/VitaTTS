@@ -4,6 +4,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  host-check:
+    # быстрая проверка main.c на обычном Linux с заглушками SDK (host/stub), без установки VitaSDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host check
+        run: make -C host check-all
+
   build:
     runs-on: ubuntu-22.04
     env:
