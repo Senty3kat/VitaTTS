@@ -100,7 +100,7 @@ list(APPEND LIBS vita2d)
 foreach(l SceDisplay_stub SceGxm_stub SceSysmodule_stub SceCtrl_stub ScePgf_stub ScePvf_stub
           SceCommonDialog_stub SceImeDialog_stub SceAudio_stub SceTouch_stub SceAppMgr_stub
           SceLibKernel_stub SceProcessmgr_stub SceThreadmgr_stub SceIofilemgr_stub
-          freetype png jpeg webp webpdemux webpmux sharpyuv bz2 brotlidec brotlicommon z m)
+          pthread freetype png jpeg webp webpdemux webpmux sharpyuv bz2 brotlidec brotlicommon z m)
   if(EXISTS "${VL}/lib${l}.a")
     list(APPEND LIBS ${l})
   endif()
