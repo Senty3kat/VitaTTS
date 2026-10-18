@@ -106,13 +106,9 @@ int main(int argc, char **argv) {
     const char *sc = argc > 2 ? argv[2] : "main";
     g_fb = calloc((size_t)SCR_W * SCR_H, 4);
     FT_Init_FreeType(&g_ft);
-    ev[nev++] = (Voice){"Pico US (SVOX)", 0, 0, 0, NULL};
-    ev[nev++] = (Voice){"Pico UK (SVOX)", 0, 1, 0, NULL};
-    ev[nev++] = (Voice){"eSpeak EN (retro)", 1, 0, 0, NULL};
-    ev[nev++] = (Voice){"SAM C64", 3, 0, 0, NULL};
-    ev[nev++] = (Voice){"RHVoice Aleksandr (RU)", 5, 0, 1, "Aleksandr-hq"};
-    ev[nev++] = (Voice){"RHVoice Anna (RU)", 5, 1, 1, "Anna"};
-    ev[nev++] = (Voice){"eSpeak RU (retro)", 1, 1, 1, NULL};
+    static const char *nm[11] = {"Pico US", "Pico UK", "Pico DE", "Pico ES", "Pico FR", "Pico IT", "SAM C64", "eSpeak EN", "RH Aleksandr", "RH Anna", "eSpeak RU"};
+    static const int en[11] = {0, 0, 0, 0, 0, 0, 3, 1, 5, 5, 1}, lg[11] = {0, 0, 2, 3, 4, 5, 0, 0, 1, 1, 1};
+    for (int i = 0; i < 11; i++) ev[nev++] = (Voice){nm[i], en[i], i % 6, lg[i], NULL};
     cur = 0;
     snprintf(hist[0], HL, "Hello, this is VITA. Experimental speech for electronic music.");
     snprintf(hist[1], HL, "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82, \xD1\x8D\xD1\x82\xD0\xBE \xD0\x92\xD0\xB8\xD1\x82\xD0\xB0. \xD0\xAD\xD0\xBA\xD1\x81\xD0\xBF\xD0\xB5\xD1\x80\xD0\xB8\xD0\xBC\xD0\xB5\xD0\xBD\xD1\x82\xD0\xB0\xD0\xBB\xD1\x8C\xD0\xBD\xD0\xB0\xD1\x8F \xD1\x80\xD0\xB5\xD1\x87\xD1\x8C.");
@@ -120,9 +116,9 @@ int main(int argc, char **argv) {
     snprintf(hist[3], HL, "one two three four");
     snprintf(hist[4], HL, "Computer love");
     hn = 5; sel = 0;
-    g_ready = 1; g_synth_ms = 480; g_audio_ms = 2300;
+    g_ready = 1; g_synth_ms = 480; g_audio_ms = 2300; g_first_ms = 310;
     ui_load();
-    if (!strcmp(sc, "ru")) { sel = 0; cur = 4; }
+    if (!strcmp(sc, "ru")) { sel = 0; cur = 8; }
     if (!strcmp(sc, "long")) { sel = 2; for (int i = 0; i < 6; i++) strcat(hist[2], " and again we are the robots"); }
     if (!strcmp(sc, "empty")) { hn = 0; }
     if (!strcmp(sc, "press")) { u_down = 1; u_tx = 400; u_ty = 400; }

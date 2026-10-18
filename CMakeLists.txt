@@ -7,7 +7,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaTTS")
 set(VITA_TITLEID  "VTTS00001")
-set(VITA_VERSION  "02.21")
+set(VITA_VERSION  "02.30")
 
 # задаются из workflow: -DWITH_PICO=ON/OFF -DWITH_ESPEAK=ON/OFF -DWITH_MBROWRAP=ON/OFF -DWITH_SAM=ON/OFF -DWITH_RHVOICE=ON/OFF
 # -DPICO_LIB=... -DESPEAK_DIR=... -DSAM_DIR=... -DRH_DIR=... -DPAYLOAD=... -DICON=...
@@ -73,7 +73,8 @@ if(WITH_RHVOICE)
     "${RH_DIR}/src/include" "${RH_DIR}/src/include/core" "${RH_DIR}/src/core" "${RH_DIR}/src"
     "${RH_DIR}/src/hts_engine" "${RH_DIR}/src/third-party/utf8" "${RH_DIR}/src/third-party/rapidxml"
     "${RH_DIR}/boost_inc")
-  target_compile_definitions(ttsrh PRIVATE "VERSION=\"1.16.0\"" HTS_EMBEDDED MAX_RATE=3)
+  target_compile_definitions(ttsrh PRIVATE "VERSION=\"1.16.0\"" HTS_EMBEDDED MAX_RATE=5)
+  target_compile_options(ttsrh PRIVATE -O3 -ffast-math -fno-finite-math-only)   # синтез RHVoice — самое тяжёлое место
   list(APPEND LIBS ttsrh)
 endif()
 
@@ -110,7 +111,7 @@ target_link_libraries(${PROJECT_NAME} -Wl,--start-group ${LIBS} -Wl,--end-group)
 # ---------- VPK ----------
 set(VPKF "")
 if(WITH_PICO)
-  foreach(b en-US_ta.bin en-US_lh0_sg.bin en-GB_ta.bin en-GB_kh0_sg.bin)
+  foreach(b en-US_ta.bin en-US_lh0_sg.bin en-GB_ta.bin en-GB_kh0_sg.bin de-DE_ta.bin de-DE_gl0_sg.bin es-ES_ta.bin es-ES_zl0_sg.bin fr-FR_ta.bin fr-FR_nk0_sg.bin it-IT_ta.bin it-IT_cm0_sg.bin)
     list(APPEND VPKF "${PAYLOAD}/${b}" "${b}")
   endforeach()
 endif()

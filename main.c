@@ -14,6 +14,7 @@
 #include <psp2/ime_dialog.h>
 #include <psp2/common_dialog.h>
 #include <vita2d.h>
+#include "xlate.h"
 
 #ifdef HAVE_PICO
 #include "picoapi.h"
@@ -40,6 +41,8 @@ int debug __attribute__((weak)) = 0;
 #endif
 
 static int dec(const unsigned char **p);
+static void tr_cyr2lat(const char *s, char *o, int om);
+static void tr_lat2cyr(const char *s, char *o, int om);
 
 int _newlib_heap_size_user = 150 * 1024 * 1024;   /* Pico 2x20 МБ + RHVoice ~40 МБ + буферы */
 
@@ -55,7 +58,11 @@ static int rq_cap;
 static int rq_eng, rq_speed = 100, rq_pitch = 100;   /* rq_eng: 0 pico, 1 espeak */
 static double pitchf = 1.0;
 static char rq_voice[40];
-static int pico_ok[2], pico_err[2], es_ok;
+#define NPICO 6
+static int pico_ok[NPICO], pico_err[NPICO], es_ok;
+static int rq_tlang = -1;                          /* язык голоса для перевода «чужих» слов (XL_*), -1 — без перевода */
+static volatile int g_first_ms;                    /* задержка до первого звука */
+static volatile uint64_t g_req_t;
 static int es_rc, es_get;
 static volatile int g_synth_ms, g_audio_ms, g_under;
 
@@ -67,7 +74,7 @@ static volatile int phn, capture;
 static int sylb[MAXSYL + 2];               /* границы слогов (в сэмплах) */
 static volatile int nsyl, sy_idx, g_sy_ready, g_sy_last = -1;
 static volatile int g_sylmode, trig_pending, auto_run, quant, g_resync;
-static volatile int bpm = 120, subdiv = 1, sens = 16;
+static volatile int bpm = 120, subdiv = 1, slices = 8;   /* slices: на сколько кусков резать фразу */
 static volatile int fullsyl;      /* слоги проговариваются до конца: новый запуск не обрывает текущий */
 static volatile unsigned long long g_tick_t;
 static float gain = 1.0f;     /* громкость */
@@ -135,11 +142,14 @@ static void sy_grain(int *bip) {
                 if (tick) fire = 1;
             } else if (trig_pending && (!quant || tick)) fire = 1;
         }
-        if (fire && fullsyl && vpos < vend) { fire = 0; trig_pending = 0; }   /* FULL: слог доигрывается до конца */
         if (fire) {
             trig_pending = 0;
             int idx = sy_idx % nsyl;
-            if (vpos < vend) { ppos = vpos; ptot = vend - vpos; if (ptot > 96) ptot = 96; pleft = ptot; }
+            if (vpos < vend) {
+                /* FULL: прошлый слог доигрывает поверх нового (ритм не сбивается); иначе — короткое затухание */
+                if (fullsyl) { ppos = vpos; pleft = vend - vpos; ptot = -1; }
+                else { ppos = vpos; ptot = vend - vpos; if (ptot > 96) ptot = 96; pleft = ptot; }
+            }
             vpos = sylb[idx]; vend = sylb[idx + 1]; vfi = 0;
             g_sy_last = idx;
             sy_idx = (idx + 1) % nsyl;
@@ -152,7 +162,10 @@ static void sy_grain(int *bip) {
             if (left < 128) f *= left / 128.0f;
             sm += phr[vpos++] * f;
         }
-        if (pleft > 0) { sm += phr[ppos++] * ((float)pleft / ptot); pleft--; }
+        if (pleft > 0) {
+            float pf2 = ptot > 0 ? (float)pleft / ptot : (pleft < 128 ? pleft / 128.0f : 1.0f);
+            sm += phr[ppos++] * pf2; pleft--;
+        }
         sm *= gain;
         ab[i] = sm > 32767.0f ? 32767 : (sm < -32768.0f ? -32768 : (short)sm);
     }
@@ -170,7 +183,10 @@ static int audio_thread(SceSize args, void *argp) {
         unsigned avail = rhead - rtail;
         int G = agrain;
         if (!playing) {
-            if (avail >= PREBUF || (g_done && avail > 0)) playing = 1;
+            if (avail >= PREBUF || (g_done && avail > 0)) {
+                playing = 1;
+                if (!g_first_ms && g_req_t) g_first_ms = (int)((sceKernelGetProcessTimeWide() - g_req_t) / 1000) + 1;
+            }
             else { sceKernelDelayThread(1000); continue; }
         }
         g_play = 1;
@@ -298,30 +314,49 @@ static void sy_analyze(void) {
     int s0 = 0; while (s0 < nf && e2[s0] < quiet) s0++;
     int e0 = nf - 1; while (e0 > s0 && e2[e0] < quiet) e0--;
     if (e0 <= s0) return;
-    float D = sens / 100.0f * M;
+    /* Режем на slices кусков: границы — самые глубокие провалы громкости (кандидаты — локальные минимумы),
+       не ближе MINF кадров друг к другу. Если провалов мало — делим самые длинные куски в их самом тихом месте. */
+    int want = slices - 1;
+    if (want > MAXSYL - 1) want = MAXSYL - 1;
+    int MINF = (e0 - s0) / (want + 1) / 3;      /* куски не короче трети среднего, и не меньше 40 мс */
+    if (MINF < 8) MINF = 8;
+    static int cf[PHR_MAX / 240 + 8];
+    static float cs[PHR_MAX / 240 + 8];
+    int nc = 0;
+    for (int f = s0 + MINF; f <= e0 - MINF; f++) {
+        if (e2[f] > e2[f - 1] || e2[f] > e2[f + 1]) continue;
+        float l = 0, r = 0;
+        for (int k = f - 30; k <= f; k++) if (k >= s0 && e2[k] > l) l = e2[k];
+        for (int k = f; k <= f + 30; k++) if (k <= e0 && e2[k] > r) r = e2[k];
+        int g = f;                              /* граница = начало звука, а не начало паузы */
+        while (g < e0 - MINF && e2[g] < quiet) g++;
+        cf[nc] = g; cs[nc] = (l < r ? l : r) - e2[f]; nc++;
+    }
     int b[MAXSYL + 2], nb = 0;
     b[nb++] = s0;
-    int st = 0, exti = s0, lastb = s0;
-    float ext = e2[s0];
-    for (int f = s0 + 1; f <= e0; f++) {
-        float v = e2[f];
-        if (st == 0) {                          /* ищем пик */
-            if (v > ext) { ext = v; exti = f; }
-            else if (ext - v > D) { st = 1; ext = v; exti = f; }
-        } else {                                /* ищем провал */
-            if (v < ext) { ext = v; exti = f; }
-            else if (v - ext > D) {
-                if (exti - lastb >= 10 && nb < MAXSYL) { b[nb++] = exti; lastb = exti; }
-                st = 0; ext = v; exti = f;
-            }
+    while (nb - 1 < want) {                     /* жадно: самый глубокий подходящий провал */
+        int best = -1;
+        for (int i = 0; i < nc; i++) {
+            if (cs[i] < 0) continue;
+            int ok = 1;
+            for (int j = 0; j < nb; j++) if (abs(cf[i] - b[j]) < MINF) { ok = 0; break; }
+            if (ok && (best < 0 || cs[i] > cs[best])) best = i;
         }
+        if (best < 0) break;
+        b[nb++] = cf[best]; cs[best] = -1;
+    }
+    for (int i = 1; i < nb; i++) for (int j = i; j > 1 && b[j] < b[j - 1]; j--) { int t = b[j]; b[j] = b[j - 1]; b[j - 1] = t; }
+    while (nb - 1 < want) {                     /* провалов не хватило: делим самый длинный кусок */
+        int bi = -1, bl = 0;
+        for (int i = 0; i < nb; i++) { int e = (i + 1 < nb) ? b[i + 1] : e0 + 1; if (e - b[i] > bl) { bl = e - b[i]; bi = i; } }
+        if (bi < 0 || bl < 2 * MINF) break;
+        int e = (bi + 1 < nb) ? b[bi + 1] : e0 + 1, m = b[bi] + bl / 2;
+        for (int f = b[bi] + MINF; f < e - MINF; f++) if (e2[f] < e2[m]) m = f;
+        while (m < e - MINF && e2[m] < quiet) m++;
+        for (int j = nb; j > bi + 1; j--) b[j] = b[j - 1];
+        b[bi + 1] = m; nb++;
     }
     b[nb] = e0 + 1;
-    for (int i = 1; i < nb; i++) {              /* граница = начало звука, а не начало паузы */
-        int k = b[i];
-        while (k < b[i + 1] - 1 && e2[k] < quiet) k++;
-        b[i] = k;
-    }
     for (int i = 0; i <= nb; i++) sylb[i] = b[i] * H;
     if (sylb[nb] > phn) sylb[nb] = phn;
     nsyl = nb;
@@ -339,32 +374,40 @@ static void sy_reanalyze(void) {
 
 /* ---------------- Pico (SVOX): отдельная система на каждый голос ---------------- */
 #ifdef HAVE_PICO
-#define PICO_MEM (20 * 1024 * 1024)
-static pico_System ps[2];
-static pico_Engine pe[2];
+#define PICO_MEM (6 * 1024 * 1024)                 /* на компьютере голосу хватает 3 МБ */
+static pico_System ps[NPICO];
+static pico_Engine pe[NPICO];
 
-static int pico_load(int v) {
-    static const char *vn[2] = {"VUS", "VGB"};
-    static const char *fl[2][2] = {
+static int pico_load1(int v, int mem_sz) {
+    static const char *vn[NPICO] = {"VUS", "VGB", "VDE", "VES", "VFR", "VIT"};
+    static const char *fl[NPICO][2] = {
         {"app0:/en-US_ta.bin", "app0:/en-US_lh0_sg.bin"},
-        {"app0:/en-GB_ta.bin", "app0:/en-GB_kh0_sg.bin"}};
-    void *mem = malloc(PICO_MEM);
+        {"app0:/en-GB_ta.bin", "app0:/en-GB_kh0_sg.bin"},
+        {"app0:/de-DE_ta.bin", "app0:/de-DE_gl0_sg.bin"},
+        {"app0:/es-ES_ta.bin", "app0:/es-ES_zl0_sg.bin"},
+        {"app0:/fr-FR_ta.bin", "app0:/fr-FR_nk0_sg.bin"},
+        {"app0:/it-IT_ta.bin", "app0:/it-IT_cm0_sg.bin"}};
+    void *mem = malloc(mem_sz);
     if (!mem) return -1;
-    int rc = pico_initialize(mem, PICO_MEM, &ps[v]);
-    if (rc) return rc;
+    int rc = pico_initialize(mem, mem_sz, &ps[v]);
+    if (rc) { free(mem); return rc; }
     rc = pico_createVoiceDefinition(ps[v], (const pico_Char *)vn[v]);
-    if (rc) return rc;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 2 && !rc; k++) {
         pico_Resource r;
         pico_Char nm[PICO_MAX_RESOURCE_NAME_SIZE];
         rc = pico_loadResource(ps[v], (const pico_Char *)fl[v][k], &r);
-        if (rc) return rc;
-        rc = pico_getResourceName(ps[v], r, (char *)nm);
-        if (rc) return rc;
-        rc = pico_addResourceToVoiceDefinition(ps[v], (const pico_Char *)vn[v], nm);
-        if (rc) return rc;
+        if (!rc) rc = pico_getResourceName(ps[v], r, (char *)nm);
+        if (!rc) rc = pico_addResourceToVoiceDefinition(ps[v], (const pico_Char *)vn[v], nm);
     }
-    return pico_newEngine(ps[v], (const pico_Char *)vn[v], &pe[v]);
+    if (!rc) rc = pico_newEngine(ps[v], (const pico_Char *)vn[v], &pe[v]);
+    if (rc) { pico_terminate(&ps[v]); free(mem); }
+    return rc;
+}
+
+static int pico_load(int v) {
+    int rc = pico_load1(v, PICO_MEM);
+    if (rc) rc = pico_load1(v, 3 * PICO_MEM);          /* запас, если 6 МБ на Vita не хватит */
+    return rc;
 }
 
 static void pico_say(int v, const char *txt) {
@@ -407,6 +450,15 @@ static void sam_run(char *in, int es) {
     for (int i = 0; i < cnt; i++) {
         int v = ((int)b[i] - 128) * 200;     /* постоянный уровень: без «качания» громкости между кусками */
         pcm[i] = (short)(v > 30000 ? 30000 : (v < -30000 ? -30000 : v));
+    }
+    {   /* мягкий ФНЧ 2-го порядка (22050 Гц): срезает 8-битный «мусор», как выходной каскад C64 */
+        const float b0 = 0.3804f, b1 = 0.7608f, b2 = 0.3804f, a1 = 0.3307f, a2 = 0.1910f;   /* Баттерворт 6.5 кГц */
+        float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (int i = 0; i < cnt; i++) {
+            float x = pcm[i], y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1; x1 = x; y2 = y1; y1 = y;
+            pcm[i] = (short)(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
+        }
     }
     for (int i = 0; i < 80 && i < cnt / 2; i++) {          /* короткие плавные края куска: без щелчков на стыках */
         float f = i / 80.0f;
@@ -490,7 +542,8 @@ static void rh_say(const char *voice, const char *txt, int es) {
     memset(&sp, 0, sizeof sp);
     sp.voice_profile = voice;
     double r = es / 100.0;
-    sp.relative_rate = r < 0.3 ? 0.3 : (r > 4.0 ? 4.0 : r);
+    sp.relative_rate = r < 0.2 ? 0.2 : (r > 5.0 ? 5.0 : r);
+    sp.flags = RHVoice_synth_flag_dont_clip_rate;      /* иначе RHVoice режет скорость до 0.5..3 и питч начинает менять темп */
     sp.relative_pitch = 1.0;
     sp.relative_volume = 1.0;
     RHVoice_message m = RHVoice_new_message(rh_eng, txt, (unsigned)strlen(txt), RHVoice_message_text, &sp, NULL);
@@ -500,10 +553,31 @@ static void rh_say(const char *voice, const char *txt, int es) {
 }
 #endif
 
+/* ---------------- перевод «чужих» слов (см. xlate.h) ---------------- */
+#ifdef HAVE_ESPEAK
+static int ph_dirty;                               /* голос eSpeak сменён фонемайзером — перед синтезом выставить заново */
+static const char *wk_phon(const char *w, int src) {
+    static char out[600];
+    if (!es_ok) return NULL;
+    espeak_SetVoiceByName(src == XL_RU ? "ru" : "en-us");
+    ph_dirty = 1;
+    const void *p = w;
+    out[0] = 0;
+    for (int g = 0; p && g < 20; g++) {
+        const char *r = espeak_TextToPhonemes(&p, espeakCHARS_UTF8, 0x02);      /* 0x02 = фонемы в IPA */
+        if (r) strncat(out, r, sizeof out - strlen(out) - 1);
+    }
+    return out;
+}
+#endif
+static void wk_fb(const char *w, int tl, char *o, int om) {
+    if (tl == XL_RU) tr_lat2cyr(w, o, om); else tr_cyr2lat(w, o, om);
+}
+
 /* ---------------- рабочий поток синтеза ---------------- */
 static int worker(SceSize args, void *argp) {
 #ifdef HAVE_PICO
-    for (int v = 0; v < 2; v++) { pico_err[v] = pico_load(v); pico_ok[v] = (pico_err[v] == 0); }
+    for (int v = 0; v < NPICO; v++) { pico_err[v] = pico_load(v); pico_ok[v] = (pico_err[v] == 0); }
 #endif
 #ifdef HAVE_ESPEAK
     es_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, "app0:", espeakINITIALIZE_DONT_EXIT);
@@ -518,7 +592,16 @@ static int worker(SceSize args, void *argp) {
         if (!g_req) { sceKernelDelayThread(2000); continue; }
         g_busy = 1; g_req = 0;
         char t[HL], buf[HL + 100];
-        snprintf(t, sizeof t, "%s", rq_text);
+        if (rq_tlang >= 0) {
+            static char xt[HL * 3];
+#ifdef HAVE_ESPEAK
+            xl_text(rq_text, rq_tlang, xt, sizeof xt, wk_phon, wk_fb);
+            if (ph_dirty) { last[0] = 0; ph_dirty = 0; }
+#else
+            xl_text(rq_text, rq_tlang, xt, sizeof xt, NULL, wk_fb);
+#endif
+            snprintf(t, sizeof t, "%s", xt);
+        } else snprintf(t, sizeof t, "%s", rq_text);
         capture = rq_cap;
         if (capture) { g_sy_ready = 0; sceKernelDelayThread(30000); phn = 0; }
         double pf = rq_pitch / 100.0;
@@ -529,7 +612,8 @@ static int worker(SceSize args, void *argp) {
         uint64_t t0 = sceKernelGetProcessTimeWide();
         if (rq_eng == 0) {
 #ifdef HAVE_PICO
-            int v = atoi(rq_voice) & 1;
+            int v = atoi(rq_voice);
+            if (v < 0 || v >= NPICO) v = 0;
             if (pico_ok[v]) {
                 int lv = es < 20 ? 20 : (es > 500 ? 500 : es);
                 snprintf(buf, sizeof buf, "<speed level='%d'>%s</speed>", lv, t);
@@ -632,7 +716,7 @@ static void clip(const char *s, char *d, int max) {
 /* ---------------- голоса / история ---------------- */
 /* lang: 0 английский, 1 русский; name — имя голоса RHVoice */
 typedef struct { const char *label; int eng; int arg; int lang; const char *name; } Voice;
-static Voice ev[12];
+static Voice ev[16];
 static int nev, cur;
 static int speed = 100, pitch = 100, volume = 100;
 static char hist[HN][HL];
@@ -664,13 +748,14 @@ static void hist_add(const char *t) {
     hist_save();
 }
 
-static void request(int eng, const char *t, const char *vn, int cap) {
+static void request(int eng, const char *t, const char *vn, int cap, int tlang) {
     g_abort = 1;
     g_flush = 1;
     while (g_busy) sceKernelDelayThread(500);
     snprintf(rq_text, sizeof rq_text, "%s", t);
     snprintf(rq_voice, sizeof rq_voice, "%s", vn);
-    rq_eng = eng; rq_speed = speed; rq_pitch = pitch; rq_cap = cap;
+    rq_eng = eng; rq_speed = speed; rq_pitch = pitch; rq_cap = cap; rq_tlang = tlang;
+    g_first_ms = 0; g_req_t = sceKernelGetProcessTimeWide();
     g_abort = 0;
     g_req = 1;
 }
@@ -735,24 +820,17 @@ static void tr_lat2cyr(const char *s, char *o, int om) {
 #undef PUT
 }
 
-/* Любой текст любым голосом (выбран один голос). Японский всегда через eSpeak — другие движки его не читают. */
+/* Любой текст любым голосом (выбран один голос): «чужие» слова переводятся в рабочем потоке через фонемы eSpeak.
+   Японский всегда через eSpeak — другие движки его не читают. */
 static void speak_ex(const char *t, int cap) {
     if (!g_ready || !t[0] || !nev) return;
-    static char tb[HL * 4];
     const Voice *v = &ev[cur];
-    int eng;
     char vn[40];
-    const char *tx = t;
-    if (detect(t) == 2) { eng = 1; snprintf(vn, sizeof vn, "ja"); }
-    else {
-        eng = v->eng;
-        if (v->lang == 1) tr_lat2cyr(t, tb, sizeof tb); else tr_cyr2lat(t, tb, sizeof tb);
-        tx = tb;
-        if (eng == 0 || eng == 3) snprintf(vn, sizeof vn, "%d", v->arg);
-        else if (eng == 5) snprintf(vn, sizeof vn, "%s", v->name);
-        else snprintf(vn, sizeof vn, "%s", v->arg ? "ru" : "en-us");
-    }
-    request(eng, tx, vn, cap);
+    if (detect(t) == 2) { snprintf(vn, sizeof vn, "ja"); request(1, t, vn, cap, -1); return; }
+    if (v->eng == 0 || v->eng == 3) snprintf(vn, sizeof vn, "%d", v->arg);
+    else if (v->eng == 5) snprintf(vn, sizeof vn, "%s", v->name);
+    else snprintf(vn, sizeof vn, "%s", v->arg ? "ru" : "en-us");
+    request(v->eng, t, vn, cap, v->lang);
 }
 
 static void speak(const char *t) { speak_ex(t, 0); }
@@ -869,17 +947,19 @@ static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
 #define LCD_W 560
 #define LCD_H_MAIN 180
 #define LCD_H_SYL 130
-#define APP_VER "v2.21"
+#define APP_VER "v2.30"
 #define PILL_X 456
 #define PILL_Y 16
 #define ROW_Y 224
 #define BIG_X 16
 #define BIG_Y 424
 #define VOI_Y 94
+#define VOI_X(i) (624 + ((i) / 6) * 156)
+#define VOI_YI(i) (VOI_Y + ((i) % 6) * 35)
 #define HIS_Y 350
 
 enum { SL_SPEED, SL_PITCH, SL_VOL, SL_BPM, SL_SENS, SL_N };
-static const int SL_MIN[SL_N] = {50, 50, 20, 40, 5}, SL_MAX[SL_N] = {250, 200, 250, 240, 45}, SL_STEP[SL_N] = {5, 5, 5, 1, 1};
+static const int SL_MIN[SL_N] = {50, 50, 20, 40, 2}, SL_MAX[SL_N] = {250, 200, 250, 240, 32}, SL_STEP[SL_N] = {5, 5, 5, 1, 1};
 
 static int sl_geo(int id, int *x, int *cy, int *w) {
     int sy = g_sylmode;
@@ -893,7 +973,7 @@ static int sl_geo(int id, int *x, int *cy, int *w) {
     }
 }
 static int sl_get(int id) {
-    switch (id) { case SL_SPEED: return speed; case SL_PITCH: return pitch; case SL_VOL: return volume; case SL_BPM: return bpm; default: return sens; }
+    switch (id) { case SL_SPEED: return speed; case SL_PITCH: return pitch; case SL_VOL: return volume; case SL_BPM: return bpm; default: return slices; }
 }
 static void sl_set(int id, int v) {
     if (v < SL_MIN[id]) v = SL_MIN[id];
@@ -903,11 +983,12 @@ static void sl_set(int id, int v) {
     case SL_PITCH: pitch = v; break;
     case SL_VOL: volume = v; gain = volume / 100.0f; break;
     case SL_BPM: bpm = v; break;
-    default: sens = v; break;
+    default: slices = v; break;
     }
 }
 
 /* ---------- касания ---------- */
+static int ui_force = 1;
 static int u_down, u_press, u_rel, u_tx, u_ty, u_drag = -1, u_dirty;
 static int inr(int x, int y, int w, int h) { return u_down && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
 static int tapr(int x, int y, int w, int h) { return u_press && u_tx >= x && u_tx < x + w && u_ty >= y && u_ty < y + h; }
@@ -959,8 +1040,8 @@ static void ui_events(int *do_new, int *do_edit) {
                     else subdiv = i - 1;
                 }
             }
-            for (int i = 0; i < nev && i < 7; i++) {
-                if (!tapr(624, VOI_Y + i * 30, 308, 28)) continue;
+            for (int i = 0; i < nev && i < 12; i++) {
+                if (!tapr(VOI_X(i), VOI_YI(i), 148, 32)) continue;
                 select_voice(i);
                 if (sy && hn) sy_render();                  /* слоги зависят от голоса: пересобрать фразу */
             }
@@ -1042,7 +1123,7 @@ static void draw_lcd(void) {
     int sx = LCD_X + 14, sw = LCD_W - 28, y = LCD_Y + 78, h = 40;
     int nn = nsyl;
     if (!g_sy_ready || nn <= 0) {
-        ftc(f_ui, LCD_X + LCD_W / 2, y + 27, RGBA8(54, 38, 10, 170), 17, g_sy_ready ? "NO SYLLABLES - LOWER SENS" : (hn ? "RENDERING PHRASE..." : "TAP HERE TO TYPE A PHRASE"));
+        ftc(f_ui, LCD_X + LCD_W / 2, y + 27, RGBA8(54, 38, 10, 170), 17, g_sy_ready ? "NO SPEECH FOUND" : (hn ? "RENDERING PHRASE..." : "TAP HERE TO TYPE A PHRASE"));
         return;
     }
     float w = (sw - 2.0f * (nn - 1)) / nn;
@@ -1055,6 +1136,17 @@ static void draw_lcd(void) {
             vita2d_draw_rectangle(x + 3, y + h - 12, w - 6 > 1 ? w - 6 : 1, 9, RGBA8(54, 38, 10, 120));
         } else vita2d_draw_rectangle(x, y, w, h, RGBA8(200, 150, 22, 255));
     }
+}
+
+/* «отпечаток» всего, что видно на экране: если не изменился, кадр не перерисовываем (меньше нагрузка на GPU) */
+static unsigned ui_sig(void) {
+    unsigned long long now = sceKernelGetProcessTimeWide();
+    int v[] = {g_ready, g_busy, g_play, g_sylmode, sel, hn, cur, speed, pitch, volume, bpm, slices, subdiv, auto_run, fullsyl,
+               g_sy_ready, nsyl, sy_idx, g_sy_last, g_audio_ms, g_first_ms, g_synth_ms, u_down, u_tx, u_ty, u_drag,
+               (int)(auto_run && now - g_tick_t < 90000ULL), hn ? (int)strlen(hist[sel]) : 0, hn ? (int)strlen(hist[0]) : 0};
+    unsigned h = 2166136261u;
+    for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) { h ^= (unsigned)v[i]; h *= 16777619u; }
+    return h;
 }
 
 static void ui_draw(void) {
@@ -1131,22 +1223,22 @@ static void ui_draw(void) {
 #ifdef HAVE_RHVOICE
         else if (g_ready && !rh_ok && ev[cur].eng == 5) snprintf(t, sizeof t, "RHVoice: not loaded");
 #endif
-        else if (g_audio_ms > 0) snprintf(t, sizeof t, "synth %d ms / audio %d ms (x%.2f)", g_synth_ms, g_audio_ms, (float)g_synth_ms / g_audio_ms);
+#ifdef HAVE_PICO
+        else if (g_ready && ev[cur].eng == 0 && !pico_ok[ev[cur].arg]) snprintf(t, sizeof t, "Pico: error %d", pico_err[ev[cur].arg]);
+#endif
+        else if (g_audio_ms > 0) snprintf(t, sizeof t, "start %d ms, synth %d/%d ms", g_first_ms, g_synth_ms, g_audio_ms);
         else snprintf(t, sizeof t, "tap the screen to type");
         ftx(f_ui, 370, 510, COL_DIM, 12, t);
     }
 
-    /* голоса */
-    for (int i = 0; i < nev && i < 7; i++) {
-        int y = VOI_Y + i * 30;
-        int on = (cur == i);
-        if (on) spr(S_ROWSEL, 624, y);
+    /* голоса: две колонки по 6 */
+    for (int i = 0; i < nev && i < 12; i++) {
+        int x = VOI_X(i), y = VOI_YI(i);
+        if (cur == i) spr(S_ROWSEL, x, y);
         int e = ev[i].eng, d = e == 0 ? 0 : (e == 1 ? 1 : (e == 3 ? 2 : 3));
         static const int DOT[4] = {S_DOT0, S_DOT1, S_DOT2, S_DOT3};
-        spr(DOT[d], 636, y + 8);
-        fit(ev[i].label, t, sizeof t, f_ui, 15, 240);
-        ftx(f_ui, 658, y + 19, COL_INK, 15, t);
-        ftr(f_ui, 920, y + 18, on ? COL_INK : COL_DIM, 12, ev[i].lang ? "RU" : "EN");
+        spr(DOT[d], x + 10, y + 10);
+        ftx(f_ui, x + 30, y + 22, COL_INK, 15, ev[i].label);
     }
 
     /* история (обрезанный текст кэшируется: ширину считать каждый кадр дорого) */
@@ -1213,21 +1305,25 @@ int main(void) {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
 #ifdef HAVE_PICO
-    ev[nev++] = (Voice){"Pico US (SVOX)", 0, 0, 0, NULL};
-    ev[nev++] = (Voice){"Pico UK (SVOX)", 0, 1, 0, NULL};
-#endif
-#ifdef HAVE_ESPEAK
-    ev[nev++] = (Voice){"eSpeak EN (retro)", 1, 0, 0, NULL};
+    ev[nev++] = (Voice){"Pico US", 0, 0, XL_EN, NULL};
+    ev[nev++] = (Voice){"Pico UK", 0, 1, XL_EN, NULL};
+    ev[nev++] = (Voice){"Pico DE", 0, 2, XL_DE, NULL};
+    ev[nev++] = (Voice){"Pico ES", 0, 3, XL_ES, NULL};
+    ev[nev++] = (Voice){"Pico FR", 0, 4, XL_FR, NULL};
+    ev[nev++] = (Voice){"Pico IT", 0, 5, XL_IT, NULL};
 #endif
 #ifdef HAVE_SAM
-    ev[nev++] = (Voice){"SAM C64", 3, 0, 0, NULL};
-#endif
-#ifdef HAVE_RHVOICE
-    ev[nev++] = (Voice){"RHVoice Aleksandr (RU)", 5, 0, 1, "Aleksandr-hq"};
-    ev[nev++] = (Voice){"RHVoice Anna (RU)", 5, 1, 1, "Anna"};
+    ev[nev++] = (Voice){"SAM C64", 3, 0, XL_EN, NULL};
 #endif
 #ifdef HAVE_ESPEAK
-    ev[nev++] = (Voice){"eSpeak RU (retro)", 1, 1, 1, NULL};
+    ev[nev++] = (Voice){"eSpeak EN", 1, 0, XL_EN, NULL};
+#endif
+#ifdef HAVE_RHVOICE
+    ev[nev++] = (Voice){"RH Aleksandr", 5, 0, XL_RU, "Aleksandr-hq"};
+    ev[nev++] = (Voice){"RH Anna", 5, 1, XL_RU, "Anna"};
+#endif
+#ifdef HAVE_ESPEAK
+    ev[nev++] = (Voice){"eSpeak RU", 1, 1, XL_RU, NULL};
 #endif
     cur = 0;
     hist_load();
@@ -1273,11 +1369,11 @@ int main(void) {
                 if (auto_run) g_resync = 1;
             }
             if (pr & SCE_CTRL_LTRIGGER) {
-                if (selh) { sens -= 3; if (sens < 5) sens = 5; sy_reanalyze(); }
+                if (selh) { if (slices > 2) slices--; sy_reanalyze(); }
                 else { sy_idx = 0; trig_pending = 0; }
             }
             if (pr & SCE_CTRL_RTRIGGER) {
-                if (selh) { sens += 3; if (sens > 45) sens = 45; sy_reanalyze(); }
+                if (selh) { if (slices < 32) slices++; sy_reanalyze(); }
                 else do_new = 1;
             }
             if (pr & (SCE_CTRL_UP | SCE_CTRL_DOWN)) {
@@ -1335,13 +1431,21 @@ int main(void) {
                 if (g_sylmode) speak_ex(buf, 1); else speak(buf);
             }
             g_reopen = 1;                                   /* системный диалог мог забрать звук */
+            ui_force = 1;
             sceCtrlPeekBufferPositive(0, &pad, 1);
             old = pad.buttons;
             tprev = 1; u_drag = -1; u_down = 0; u_press = 0;
             continue;
         }
 
-        /* --- рисование --- */
+        /* --- рисование: только если что-то изменилось (и раз в полсекунды на всякий случай) --- */
+        {
+            static unsigned last_sig;
+            static int idle;
+            unsigned sg = ui_sig();
+            if (sg == last_sig && idle < 30 && !ui_force) { idle++; sceKernelDelayThread(16000); continue; }
+            last_sig = sg; idle = 0; ui_force = 0;
+        }
         vita2d_start_drawing();
         vita2d_clear_screen();
         ui_draw();

@@ -230,7 +230,7 @@ def make_cards():
 
 
 def make_row_sel():
-    w, h = 308, 28
+    w, h = 148, 32
     cv = Image.new("RGBA", (w + 8, h + 8), (0, 0, 0, 0))
     m = mask_rr(w, h, 7)
     shadow(cv, m, 4, 4, dy=2, r=2, a=0.3)
@@ -423,7 +423,7 @@ def body(mode):
     PX, PY, PW, PH = 16, 276, 580, 132
     sunk(cv, PX, PY, PW, PH, 12, CREAM_D, (222, 212, 186))
     f_lab = font(FB, 13)
-    rows = [(318, "SPEED"), (366, "PITCH")] if mode == "main" else [(304, "BPM"), (342, "PITCH"), (380, "SENS")]
+    rows = [(318, "SPEED"), (366, "PITCH")] if mode == "main" else [(304, "BPM"), (342, "PITCH"), (380, "SLICES")]
     for cy, lb in rows:
         text(cv, (30, cy), lb, f_lab, INK + (255,), anchor="lm", spacing=1)
         groove(cv, 108, cy, 400 if mode == "main" else 190)
@@ -441,9 +441,9 @@ def body(mode):
     sunk(cv, 612, 64, 332, 248, 14, CREAM_D, (222, 212, 186))
     text(cv, (626, 70), "VOICE", font(FB, 13), INK + (255,), spacing=2)
     text(cv, (938 - text_w("L / R", font(FB, 11), 1), 72), "L / R", font(FB, 11), INK_L + (255,), spacing=1)
-    for i in range(7):
-        y = 94 + i * 30
-        sunk(cv, 624, y, 308, 28, 7, (244, 238, 222), (232, 224, 202), border=False, a=0.18)
+    for i in range(12):                       # две колонки по 6 голосов
+        x, y = 624 + (i // 6) * 156, 94 + (i % 6) * 35
+        sunk(cv, x, y, 148, 32, 7, (244, 238, 222), (232, 224, 202), border=False, a=0.18)
     # история
     sunk(cv, 612, 322, 332, 200, 14, CREAM_D, (222, 212, 186))
     text(cv, (626, 328), "HISTORY", font(FB, 13), INK + (255,), spacing=2)

@@ -107,7 +107,7 @@ jobs:
         run: |
           mkdir -p payload
           git clone --depth 1 https://github.com/naggety/picotts
-          for f in en-US_ta.bin en-US_lh0_sg.bin en-GB_ta.bin en-GB_kh0_sg.bin; do
+          for f in en-US_ta.bin en-US_lh0_sg.bin en-GB_ta.bin en-GB_kh0_sg.bin de-DE_ta.bin de-DE_gl0_sg.bin es-ES_ta.bin es-ES_zl0_sg.bin fr-FR_ta.bin fr-FR_nk0_sg.bin it-IT_ta.bin it-IT_cm0_sg.bin; do
             cp "$(find picotts -name $f | head -1)" payload/
           done
 
