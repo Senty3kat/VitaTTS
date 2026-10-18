@@ -378,12 +378,6 @@ def body(mode):
     fl = font(FBO, 40)
     text(cv, (30, 14), "Vita", fl, RED + (255,), spacing=1)
     text(cv, (30 + text_w("Vita", fl, 1) + 2, 14), "TTS", fl, INK + (255,), spacing=1)
-    text(cv, (204, 17), "TEXT TO SPEECH", f_tag, INK_L + (255,), spacing=1)
-    text(cv, (204, 32), "FOR EXPERIMENTAL", f_tag, INK_L + (255,), spacing=1)
-    text(cv, (204, 47), "& ELECTRONIC MUSIC", f_tag, INK_L + (255,), spacing=1)
-    d = ImageDraw.Draw(cv)
-    d.line([(192, 16), (192, 56)], fill=EDGE + (255,), width=1)
-
     # ЖК-экран
     LX, LY, LW, LH = 16, 64, 580, (200 if mode == "main" else 150)
     bm = mask_rr(LW, LH, 16)
@@ -519,8 +513,51 @@ def pack(items, width=1024):
     return atlas, pos
 
 
+# ---------- готовые надписи ----------
+# Крупный текст через шрифт vita2d на Vita выходит мыльным и с «рамкой» (соседние глифы в кэше), поэтому постоянные
+# надписи рисуются здесь в PNG. main.c сам берёт картинку, если строка, размер и цвет совпали (LBL_TAB в ui_atlas.h).
+def rgba8(r, g, b, a=255):
+    return (a << 24) | (b << 16) | (g << 8) | r
+
+
+LBL = []   # (текст, размер, (r,g,b,a))
+
+
+def labels():
+    ink = INK + (255,)
+    dim = (120, 108, 88, 255)
+    for t in ("SPEAK", "STOP", "TYPE TEXT", "AUTOPLAY", "STOP AUTO"):
+        LBL.append((t, 34, ink))
+    for t in ("REWIND", "NEXT SYLLABLE", "LOADING", "SPEAKING", "READY"):
+        LBL.append((t, 17, ink))
+    for t in ("L", "X O TRI SQ"):
+        LBL.append((t, 11, dim))
+    for t in ("SYLLABLE", "FULL", "TAP TEMPO", "1/4", "1/8", "1/8T", "1/16", "eSpeak JA"):
+        LBL.append((t, 14, ink))
+    voices = ("Pico US", "Pico UK", "Pico DE", "Pico ES", "Pico FR", "Pico IT", "SAM C64", "eSpeak EN", "RH Aleksandr", "RH Anna", "eSpeak RU")
+    for t in voices:
+        LBL.append((t, 15, ink))
+        LBL.append((t, 14, ink))
+    LBL.append(("TAP HERE TO TYPE A PHRASE", 22, (54, 38, 10, 150)))
+    for t in ("TAP HERE TO TYPE A PHRASE", "NO SPEECH FOUND", "RENDERING PHRASE..."):
+        LBL.append((t, 17, (54, 38, 10, 170)))
+    out = []
+    for i, (t, sz, col) in enumerate(LBL):
+        f = font(FB, sz)
+        asc, desc = f.getmetrics()
+        pad = 2
+        w = int(text_w(t, f)) + 2 * pad + 1
+        img = Image.new("RGBA", (w, asc + desc + 2 * pad), (0, 0, 0, 0))
+        ImageDraw.Draw(img).text((pad, pad + asc), t, font=f, fill=col, anchor="ls")
+        name = f"lb{i}"
+        reg(name, img, 0)
+        out.append((t, sz, rgba8(*col), name, pad, pad + asc))
+    return out
+
+
 def main():
     make_buttons(); make_chips(); make_cards(); make_row_sel(); make_thumb(); make_leds(); make_icons()
+    lbls = labels()
     os.makedirs(os.path.join(ROOT, "assets"), exist_ok=True)
     os.makedirs(os.path.join(ROOT, "design", "parts"), exist_ok=True)
     items = sorted(SPR.items(), key=lambda kv: (-kv[1][0].size[1], kv[0]))
@@ -550,6 +587,12 @@ def main():
             x, y, w, h, p = pos[n]
             f.write(f"    {{{x}, {y}, {w}, {h}, {p}}}, /* {n} */\n")
         f.write("};\n")
+        f.write("/* готовые надписи: текст, размер, цвет RGBA8, спрайт, отступ слева, базовая линия */\n")
+        f.write("typedef struct { const char *t; short size; unsigned col; short id, ox, base; } LblTab;\n")
+        f.write("static const LblTab LBL_TAB[] = {\n")
+        for t, sz, col, name, ox, base in lbls:
+            f.write(f'    {{"{t}", {sz}, {col}u, S_{name.upper()}, {ox}, {base}}},\n')
+        f.write("};\n#define LBL_N ((int)(sizeof LBL_TAB / sizeof LBL_TAB[0]))\n")
     print("atlas", atlas.size, len(SPR), "sprites")
 
 

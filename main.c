@@ -314,12 +314,10 @@ static void sy_analyze(void) {
     int s0 = 0; while (s0 < nf && e2[s0] < quiet) s0++;
     int e0 = nf - 1; while (e0 > s0 && e2[e0] < quiet) e0--;
     if (e0 <= s0) return;
-    /* Режем на slices кусков: границы — самые глубокие провалы громкости (кандидаты — локальные минимумы),
-       не ближе MINF кадров друг к другу. Если провалов мало — делим самые длинные куски в их самом тихом месте. */
+    /* Режем на slices кусков. Кандидаты в границы — локальные минимумы громкости с оценкой глубины. */
     int want = slices - 1;
     if (want > MAXSYL - 1) want = MAXSYL - 1;
-    int MINF = (e0 - s0) / (want + 1) / 3;      /* куски не короче трети среднего, и не меньше 40 мс */
-    if (MINF < 8) MINF = 8;
+    const int MINF = 4;
     static int cf[PHR_MAX / 240 + 8];
     static float cs[PHR_MAX / 240 + 8];
     int nc = 0;
@@ -332,29 +330,30 @@ static void sy_analyze(void) {
         while (g < e0 - MINF && e2[g] < quiet) g++;
         cf[nc] = g; cs[nc] = (l < r ? l : r) - e2[f]; nc++;
     }
+    /* Границы ставятся равномерно по длине фразы (как шаги сетки), но каждая сдвигается к ближайшему
+       хорошему провалу громкости в своём окне, чтобы не резать посреди звука. */
     int b[MAXSYL + 2], nb = 0;
     b[nb++] = s0;
-    while (nb - 1 < want) {                     /* жадно: самый глубокий подходящий провал */
+    int Lf = e0 + 1 - s0, step = Lf / (want + 1);
+    for (int k = 1; k <= want && step >= 2; k++) {
+        int T = s0 + (int)((long long)Lf * k / (want + 1)), W = step / 2;
         int best = -1;
+        float bs = -1e9f;
         for (int i = 0; i < nc; i++) {
-            if (cs[i] < 0) continue;
-            int ok = 1;
-            for (int j = 0; j < nb; j++) if (abs(cf[i] - b[j]) < MINF) { ok = 0; break; }
-            if (ok && (best < 0 || cs[i] > cs[best])) best = i;
+            int d = abs(cf[i] - T);
+            if (d > W) continue;
+            float sc = cs[i] / M - 0.6f * d / (float)(W > 0 ? W : 1);
+            if (sc > bs) { bs = sc; best = i; }
         }
-        if (best < 0) break;
-        b[nb++] = cf[best]; cs[best] = -1;
-    }
-    for (int i = 1; i < nb; i++) for (int j = i; j > 1 && b[j] < b[j - 1]; j--) { int t = b[j]; b[j] = b[j - 1]; b[j - 1] = t; }
-    while (nb - 1 < want) {                     /* провалов не хватило: делим самый длинный кусок */
-        int bi = -1, bl = 0;
-        for (int i = 0; i < nb; i++) { int e = (i + 1 < nb) ? b[i + 1] : e0 + 1; if (e - b[i] > bl) { bl = e - b[i]; bi = i; } }
-        if (bi < 0 || bl < 2 * MINF) break;
-        int e = (bi + 1 < nb) ? b[bi + 1] : e0 + 1, m = b[bi] + bl / 2;
-        for (int f = b[bi] + MINF; f < e - MINF; f++) if (e2[f] < e2[m]) m = f;
-        while (m < e - MINF && e2[m] < quiet) m++;
-        for (int j = nb; j > bi + 1; j--) b[j] = b[j - 1];
-        b[bi + 1] = m; nb++;
+        int m;
+        if (best >= 0) m = cf[best];
+        else {                                  /* провала нет: самое тихое место рядом с целью */
+            m = T;
+            for (int f = T - W / 2; f <= T + W / 2; f++) if (f > s0 && f < e0 && e2[f] < e2[m]) m = f;
+            while (m < e0 - 4 && e2[m] < quiet) m++;
+        }
+        if (m - b[nb - 1] < 4 || m > e0 - 4) continue;
+        b[nb++] = m;
     }
     b[nb] = e0 + 1;
     for (int i = 0; i <= nb; i++) sylb[i] = b[i] * H;
@@ -556,11 +555,14 @@ static void rh_say(const char *voice, const char *txt, int es) {
 /* ---------------- перевод «чужих» слов (см. xlate.h) ---------------- */
 #ifdef HAVE_ESPEAK
 static int ph_dirty;                               /* голос eSpeak сменён фонемайзером — перед синтезом выставить заново */
+static int ph_voice = -1;                          /* какой язык сейчас загружен для фонем */
 static const char *wk_phon(const char *w, int src) {
     static char out[600];
     if (!es_ok) return NULL;
-    espeak_SetVoiceByName(src == XL_RU ? "ru" : "en-us");
-    ph_dirty = 1;
+    if (ph_voice != src) {                        /* смена голоса грузит словарь (дорого) — только когда нужно */
+        espeak_SetVoiceByName(src == XL_RU ? "ru" : "en-us");
+        ph_voice = src; ph_dirty = 1;
+    }
     const void *p = w;
     out[0] = 0;
     for (int g = 0; p && g < 20; g++) {
@@ -631,7 +633,7 @@ static int worker(SceSize args, void *argp) {
         } else {
 #ifdef HAVE_ESPEAK
             if (es_ok) {
-                if (strcmp(last, rq_voice)) { espeak_SetVoiceByName(rq_voice); snprintf(last, sizeof last, "%s", rq_voice); }
+                if (strcmp(last, rq_voice)) { espeak_SetVoiceByName(rq_voice); snprintf(last, sizeof last, "%s", rq_voice); ph_voice = -1; }
                 int wpm = 170 * es / 100; if (wpm < 80) wpm = 80; if (wpm > 450) wpm = 450;
                 es_rc = espeak_SetParameter(espeakRATE, wpm, 0);
                 espeak_SetParameter(espeakRANGE, 100, 0);
@@ -887,16 +889,34 @@ static void spr(int id, float x, float y) {
 
 /* текст: TTF, а для японского (нет глифов в DejaVu) — системный PVF */
 static int is_jp(const char *s) { return detect(s) == 2; }
+static const LblTab *lbl_find(vita2d_font *f, int size, unsigned c, const char *s) {
+    if (f != f_ui || !g_atlas) return NULL;
+    for (int i = 0; i < LBL_N; i++)
+        if (LBL_TAB[i].size == size && LBL_TAB[i].col == c && !strcmp(LBL_TAB[i].t, s)) return &LBL_TAB[i];
+    return NULL;
+}
 static void ftx(vita2d_font *f, int x, int y, unsigned c, int size, const char *s) {
+    const LblTab *L = lbl_find(f, size, c, s);
+    if (L) {                                         /* готовая надпись из PNG: чётко на любом размере */
+        const SprRect *r = &SPR_TAB[L->id];
+        vita2d_draw_texture_part(g_atlas, x - L->ox, y - L->base, r->x, r->y, r->w, r->h);
+        return;
+    }
     if (f && !is_jp(s)) vita2d_font_draw_text(f, x, y, c, size, s);
     else if (font) vita2d_pvf_draw_text(font, x, y, c, size / 16.0f, s);
+}
+static int fw_c(vita2d_font *f, int size, unsigned c, const char *s) {
+    const LblTab *L = lbl_find(f, size, c, s);
+    if (L) return SPR_TAB[L->id].w - 2 * L->ox;
+    if (f && !is_jp(s)) return vita2d_font_text_width(f, size, s);
+    return (int)(strlen(s) * size * 0.55f);
 }
 static int fw(vita2d_font *f, int size, const char *s) {
     if (f && !is_jp(s)) return vita2d_font_text_width(f, size, s);
     return (int)(strlen(s) * size * 0.55f);
 }
-static void ftc(vita2d_font *f, int cx, int y, unsigned c, int size, const char *s) { ftx(f, cx - fw(f, size, s) / 2, y, c, size, s); }
-static void ftr(vita2d_font *f, int rx, int y, unsigned c, int size, const char *s) { ftx(f, rx - fw(f, size, s), y, c, size, s); }
+static void ftc(vita2d_font *f, int cx, int y, unsigned c, int size, const char *s) { ftx(f, cx - fw_c(f, size, c, s) / 2, y, c, size, s); }
+static void ftr(vita2d_font *f, int rx, int y, unsigned c, int size, const char *s) { ftx(f, rx - fw_c(f, size, c, s), y, c, size, s); }
 static void fit(const char *s, char *d, int dsz, vita2d_font *f, int size, int maxw) {
     snprintf(d, dsz, "%s", s);
     if (fw(f, size, d) <= maxw) return;
@@ -947,7 +967,7 @@ static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
 #define LCD_W 560
 #define LCD_H_MAIN 180
 #define LCD_H_SYL 130
-#define APP_VER "v2.30"
+#define APP_VER "v2.40"
 #define PILL_X 456
 #define PILL_Y 16
 #define ROW_Y 224
@@ -959,7 +979,7 @@ static int lcd_wrap(const char *s, int cap, int maxl, int *ls, int *ll) {
 #define HIS_Y 350
 
 enum { SL_SPEED, SL_PITCH, SL_VOL, SL_BPM, SL_SENS, SL_N };
-static const int SL_MIN[SL_N] = {50, 50, 20, 40, 2}, SL_MAX[SL_N] = {250, 200, 250, 240, 32}, SL_STEP[SL_N] = {5, 5, 5, 1, 1};
+static const int SL_MIN[SL_N] = {20, 50, 20, 40, 2}, SL_MAX[SL_N] = {250, 200, 250, 240, 32}, SL_STEP[SL_N] = {5, 5, 5, 1, 1};
 
 static int sl_geo(int id, int *x, int *cy, int *w) {
     int sy = g_sylmode;
@@ -1415,7 +1435,7 @@ int main(void) {
             if (pr & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) {
                 int d = (pr & SCE_CTRL_RIGHT) ? 10 : -10;
                 if (selh) { pitch += d; if (pitch < 50) pitch = 50; if (pitch > 200) pitch = 200; }
-                else { speed += d; if (speed < 50) speed = 50; if (speed > 250) speed = 250; }
+                else { speed += d; if (speed < 20) speed = 20; if (speed > 250) speed = 250; }
             }
             if (pr & SCE_CTRL_SQUARE) { g_abort = 1; g_flush = 1; }
             if ((pr & SCE_CTRL_CIRCLE) && hn) speak(hist[sel]);
